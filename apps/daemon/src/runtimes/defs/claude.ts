@@ -69,6 +69,9 @@ export const claudeAgentDef = {
       if (dirs.length > 0 && caps.addDir !== false) {
         args.push('--add-dir', ...dirs);
       }
+      if (process.env.OD_CLAUDE_STRICT_MCP === '1') {
+        args.push('--strict-mcp-config');
+      }
       args.push('--permission-mode', 'bypassPermissions');
       return args;
     },
