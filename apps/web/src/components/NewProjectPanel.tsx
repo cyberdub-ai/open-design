@@ -130,6 +130,7 @@ export function NewProjectPanel({
   );
   const [dsSelectionTouched, setDsSelectionTouched] = useState(false);
   const [dsMulti, setDsMulti] = useState(false);
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
 
   // Per-tab metadata. Tracked independently so switching tabs preserves
   // each tab's pick rather than resetting to defaults.
@@ -200,6 +201,8 @@ export function NewProjectPanel({
     setSelectedDsIds(initialDefaultDsSelection);
   }, [dsSelectionTouched, initialDefaultDsSelection]);
 
+  const showSkillPicker = tab === 'prototype' || tab === 'deck';
+
   // When entering the template tab, snap to the first user-saved template
   // if there is one (and we don't already have a valid pick). The template
   // tab no longer offers a built-in fallback — the entire point is to
@@ -214,6 +217,19 @@ export function NewProjectPanel({
       setTemplateId(templates[0]!.id);
     }
   }, [tab, templates, templateId]);
+
+  // Skills available for the current tab (used by the skill picker dropdown).
+  const skillsForTab = useMemo(() => {
+    if (tab === 'prototype') return skills.filter((s) => s.mode === 'prototype');
+    if (tab === 'deck') return skills.filter((s) => s.mode === 'deck');
+    return [];
+  }, [tab, skills]);
+
+  // Reset skill selection when switching tabs so a deck pick doesn't carry
+  // over into prototype mode.
+  useEffect(() => {
+    setSelectedSkillId(null);
+  }, [tab]);
 
   // The skill the request still routes through — kept so prototype/deck
   // pick a default-rendered skill (so the agent gets the right SKILL.md
@@ -338,7 +354,7 @@ export function NewProjectPanel({
     });
     onCreate({
       name: name.trim() || autoName(tab, t),
-      skillId: skillIdForTab,
+      skillId: selectedSkillId ?? skillIdForTab,
       designSystemId: primaryDs,
       metadata,
     });
@@ -410,6 +426,27 @@ export function NewProjectPanel({
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
+
+        {showSkillPicker && skillsForTab.length > 0 ? (
+          <div className="newproj-section">
+            <label className="newproj-label" htmlFor="newproj-skill-select">
+              Скилл
+            </label>
+            <select
+              id="newproj-skill-select"
+              className="newproj-skill-select"
+              value={selectedSkillId ?? ''}
+              onChange={(e) => setSelectedSkillId(e.target.value || null)}
+            >
+              <option value="">— авто —</option>
+              {skillsForTab.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : null}
 
         {showDesignSystemPicker ? (
           <DesignSystemPicker

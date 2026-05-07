@@ -51,3 +51,5 @@ tsconfig.tsbuildinfo
 task.md
 specs/change/active
 .ralph/
+design-systems/refero-*/
+.omc/
