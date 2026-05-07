@@ -80,6 +80,9 @@ export const claudeAgentDef = {
       } else if (typeof runtimeContext.newSessionId === 'string' && runtimeContext.newSessionId) {
         args.push('--session-id', runtimeContext.newSessionId);
       }
+      if (process.env.OD_CLAUDE_STRICT_MCP === '1') {
+        args.push('--strict-mcp-config');
+      }
       args.push('--permission-mode', 'bypassPermissions');
       return args;
     },

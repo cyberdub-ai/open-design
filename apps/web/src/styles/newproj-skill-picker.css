@@ -1,0 +1,14 @@
+.newproj-skill-select {
+  width: 100%;
+  background: var(--surface-1, #1a1a1a);
+  color: var(--text-primary, #e5e5e5);
+  border: 1px solid var(--border-subtle, rgba(255,255,255,0.1));
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+}
+.newproj-skill-select:focus {
+  border-color: var(--accent, #e07b54);
+}

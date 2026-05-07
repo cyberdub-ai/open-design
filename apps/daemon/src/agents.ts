@@ -15,12 +15,14 @@ export { resolveAgentBin } from './runtimes/resolution.js';
 export { openDesignAmrTraceEnv, spawnEnvForAgent } from './runtimes/env.js';
 export { buildLiveArtifactsMcpServersForAgent } from './runtimes/mcp.js';
 export {
-  checkPromptArgvBudget,
-  checkWindowsCmdShimCommandLineBudget,
-  checkWindowsDirectExeCommandLineBudget,
-} from './runtimes/prompt-budget.js';
+    // ... 1362 lines omitted
 export {
-  rememberLiveModels,
-  isKnownModel,
-  sanitizeCustomModel,
-} from './runtimes/models.js';
+    // ... 1361 lines omitted
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { existsSync } from 'node:fs';
+import { delimiter } from 'node:path';
+import path from 'node:path';
+import { homedir } from 'node:os';
+import { wellKnownUserToolchainBins } from '@open-design/platform';
+// ... 1354 more lines (total: 1375)
