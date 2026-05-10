@@ -19,7 +19,13 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 const SERVER_NAME = 'open-design';
-const SERVER_VERSION = '0.2.0';
+const SERVER_VERSION = '0.3.0';
+
+// Write tools (create_project, write_file, ...) are gated behind this
+// env so an operator can enforce read-only by exporting OD_MCP_READONLY=1.
+// Default is "writes enabled" because the MCP runs against the user's
+// own local daemon - the same trust boundary as the OD UI itself.
+const WRITES_ENABLED = process.env.OD_MCP_READONLY !== '1';
 
 type JsonObject = Record<string, unknown>;
 interface RunMcpOptions { daemonUrl: string | URL }
@@ -60,6 +66,16 @@ const TEXTUAL_MIME_PATTERNS = [
 const READ_ANNOTATIONS = {
   readOnlyHint: true,
   idempotentHint: true,
+  openWorldHint: false,
+};
+
+// Mutating tools. Idempotency varies (write_file: yes; create_project: no
+// because POST /api/projects rejects duplicate ids), so per-tool defs
+// override idempotentHint where appropriate. destructiveHint: true on
+// delete_project / delete_file to surface the risk in MCP UIs.
+const WRITE_ANNOTATIONS = {
+  readOnlyHint: false,
+  idempotentHint: false,
   openWorldHint: false,
 };
 
@@ -204,8 +220,146 @@ const TOOL_DEFS = [
   // tokens on every turn.
 ];
 
-export async function runMcpStdio({ daemonUrl }: RunMcpOptions): Promise<void> {
-  const baseUrl = String(daemonUrl).replace(/\/$/, '');
+// Mutating tools, appended only when OD_MCP_READONLY!=1. Kept as a
+// separate array so the tools/list response in read-only deployments
+// matches the historical 0.2.x shape exactly (no extra schema entries
+// the agent would mention but cannot use).
+const WRITE_TOOL_DEFS = [
+  {
+    name: 'create_project',
+    description:
+      'Create a new Open Design project. id is optional - when omitted, a slug is derived from name (a-z, 0-9, dash). skillId / designSystemId / pendingPrompt mirror the New Project panel in the UI. Returns the created project plus the seeded conversationId.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Human-readable project name. Required.',
+        },
+        id: {
+          type: 'string',
+          description:
+            "Optional explicit project id. Must match /^[A-Za-z0-9._-]{1,128}$/. When omitted, a slug derived from name is used; a random suffix is appended on collision.",
+        },
+        skillId: {
+          type: 'string',
+          description: 'Optional skill id (e.g. "web-prototype-taste-soft"). Use list-style tooling in the UI to discover ids.',
+        },
+        designSystemId: {
+          type: 'string',
+          description: 'Optional design-system id. Pass null/omit for the default.',
+        },
+        pendingPrompt: {
+          type: 'string',
+          description: 'Optional initial prompt the project should open with.',
+        },
+        metadata: {
+          type: 'object',
+          description: 'Optional metadata blob (kind, fidelity, entryFile, ...). Preserved as-is.',
+          additionalProperties: true,
+        },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, title: 'Create Open Design project' },
+  },
+  {
+    name: 'update_project',
+    description:
+      'Update Open Design project fields (rename, change skill/design-system, edit metadata). PATCH-style: only fields you pass are written. Returns the updated project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        name: { type: 'string' },
+        skillId: { type: 'string' },
+        designSystemId: { type: 'string' },
+        pendingPrompt: { type: 'string' },
+        metadata: { type: 'object', additionalProperties: true },
+      },
+      required: ['project'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, idempotentHint: true, title: 'Update Open Design project' },
+  },
+  {
+    name: 'delete_project',
+    description:
+      'Delete an Open Design project AND its on-disk files. Permanent - there is no undo. Requires confirm=true to actually run; without it the tool returns a dry-run summary so the agent can confirm with the user first.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        confirm: {
+          type: 'boolean',
+          description: 'Must be true. Without confirm=true the tool only returns the project that would be deleted.',
+        },
+      },
+      required: ['project'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, destructiveHint: true, title: 'Delete Open Design project' },
+  },
+  {
+    name: 'write_file',
+    description:
+      "Create or overwrite a project file. content is treated as UTF-8 text by default; pass encoding=\"base64\" for binary uploads. project is optional and falls back to the active project. Returns the written file's metadata.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        path: {
+          type: 'string',
+          description: 'Project-relative path. Forward slashes. Required.',
+        },
+        content: {
+          type: 'string',
+          description: 'File body. UTF-8 text by default; base64 when encoding="base64".',
+        },
+        encoding: {
+          type: 'string',
+          enum: ['utf8', 'base64'],
+          description: 'utf8 (default) | base64',
+        },
+        artifactManifest: {
+          type: 'object',
+          description: 'Optional artifact manifest passed through to writeProjectFile.',
+          additionalProperties: true,
+        },
+      },
+      required: ['path', 'content'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, idempotentHint: true, title: 'Write project file' },
+  },
+  {
+    name: 'delete_file',
+    description:
+      'Delete one project file. Permanent - no undo. project is optional and falls back to active. Requires confirm=true; without it the tool returns the file metadata that would be removed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        path: {
+          type: 'string',
+          description: 'Project-relative path of the file to delete.',
+        },
+        confirm: {
+          type: 'boolean',
+          description: 'Must be true. Without confirm=true the tool returns a dry-run.',
+        },
+      },
+      required: ['path'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, destructiveHint: true, title: 'Delete project file' },
+  },
+];
+
+const ALL_TOOL_DEFS = WRITES_ENABLED ? [...TOOL_DEFS, ...WRITE_TOOL_DEFS] : TOOL_DEFS;
+
+export async function runMcpStdio({ daemonUrl }: RunMcpOptions): Promise<void> {  const baseUrl = String(daemonUrl).replace(/\/$/, '');
 
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
@@ -261,7 +415,7 @@ export async function runMcpStdio({ daemonUrl }: RunMcpOptions): Promise<void> {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_DEFS,
+    tools: ALL_TOOL_DEFS,
   }));
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => {
@@ -417,6 +571,93 @@ export async function runMcpStdio({ daemonUrl }: RunMcpOptions): Promise<void> {
             ),
           );
         }
+        case 'create_project': {
+          if (!WRITES_ENABLED) return errorResult('writes disabled (OD_MCP_READONLY=1).');
+          requireString(args.name, 'name');
+          const id = await pickProjectId(baseUrl, args.id, args.name);
+          const body: Record<string, unknown> = { id, name: args.name };
+          if (typeof args.skillId === 'string') body.skillId = args.skillId;
+          if (typeof args.designSystemId === 'string') body.designSystemId = args.designSystemId;
+          if (typeof args.pendingPrompt === 'string') body.pendingPrompt = args.pendingPrompt;
+          if (args.metadata && typeof args.metadata === 'object') body.metadata = args.metadata;
+          const created = await postJson(`${baseUrl}/api/projects`, body);
+          invalidateProjectListCache();
+          return ok(created);
+        }
+        case 'update_project': {
+          if (!WRITES_ENABLED) return errorResult('writes disabled (OD_MCP_READONLY=1).');
+          const { id, resolved } = await resolveProjectArg(baseUrl, args.project);
+          const patch: Record<string, unknown> = {};
+          if (typeof args.name === 'string') patch.name = args.name;
+          if (typeof args.skillId === 'string') patch.skillId = args.skillId;
+          if (typeof args.designSystemId === 'string') patch.designSystemId = args.designSystemId;
+          if (typeof args.pendingPrompt === 'string') patch.pendingPrompt = args.pendingPrompt;
+          if (args.metadata && typeof args.metadata === 'object') patch.metadata = args.metadata;
+          if (Object.keys(patch).length === 0) {
+            return errorResult('no fields to update; pass at least one of name/skillId/designSystemId/pendingPrompt/metadata.');
+          }
+          const data = await patchJson(`${baseUrl}/api/projects/${encodeURIComponent(id)}`, patch);
+          if (typeof patch.name === 'string') invalidateProjectListCache();
+          return ok(withActiveEcho(data, null, resolved));
+        }
+        case 'delete_project': {
+          if (!WRITES_ENABLED) return errorResult('writes disabled (OD_MCP_READONLY=1).');
+          const { id, resolved } = await resolveProjectArg(baseUrl, args.project);
+          if (args.confirm !== true) {
+            const project = await getJson(`${baseUrl}/api/projects/${encodeURIComponent(id)}`);
+            return ok({
+              dryRun: true,
+              wouldDelete: project?.project ?? project,
+              hint: 'Re-call with confirm=true to actually delete.',
+              ...(resolved && (resolved.source === 'slug' || resolved.source === 'substring')
+                ? { resolvedProject: { id: resolved.id, name: resolved.name } }
+                : {}),
+            });
+          }
+          const result = await deleteJson(`${baseUrl}/api/projects/${encodeURIComponent(id)}`);
+          invalidateProjectListCache();
+          return ok(result);
+        }
+        case 'write_file': {
+          if (!WRITES_ENABLED) return errorResult('writes disabled (OD_MCP_READONLY=1).');
+          const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
+          requireString(args.path, 'path');
+          requireString(args.content, 'content');
+          const body: Record<string, unknown> = {
+            name: args.path,
+            content: args.content,
+            encoding: args.encoding === 'base64' ? 'base64' : 'utf8',
+          };
+          if (args.artifactManifest !== undefined && args.artifactManifest !== null) {
+            body.artifactManifest = args.artifactManifest;
+          }
+          const data = await postJson(`${baseUrl}/api/projects/${encodeURIComponent(id)}/files`, body);
+          return ok(withActiveEcho(data, active, resolved));
+        }
+        case 'delete_file': {
+          if (!WRITES_ENABLED) return errorResult('writes disabled (OD_MCP_READONLY=1).');
+          const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
+          requireString(args.path, 'path');
+          if (args.confirm !== true) {
+            return ok({
+              dryRun: true,
+              wouldDelete: { project: id, path: args.path },
+              hint: 'Re-call with confirm=true to actually delete.',
+              ...(resolved && (resolved.source === 'slug' || resolved.source === 'substring')
+                ? { resolvedProject: { id: resolved.id, name: resolved.name } }
+                : {}),
+            });
+          }
+          // Server route is /api/projects/:id/files/:name (single segment).
+          // Path arg is treated as the file name; nested paths are
+          // intentionally not supported here because the underlying
+          // sanitizeName collapses them.
+          const fileName = String(args.path).split('/').filter(Boolean).pop() || String(args.path);
+          const data = await deleteJson(
+            `${baseUrl}/api/projects/${encodeURIComponent(id)}/files/${encodeURIComponent(fileName)}`,
+          );
+          return ok(withActiveEcho(data, active, resolved));
+        }
         default:
           return errorResult(`unknown tool: ${name}`);
       }
@@ -486,6 +727,15 @@ async function fetchProjectList(baseUrl: string): Promise<ProjectSummary[]> {
   const list = Array.isArray(data?.projects) ? data.projects : [];
   projectListCache = { baseUrl, t: now, list };
   return list;
+}
+
+// Mutating tools must drop the cached project list so subsequent
+// resolve-by-name lookups inside the same MCP session see the change.
+// Without this, e.g. write_file right after create_project fails with
+// "no project matches" because the cache still reflects the pre-create
+// state for up to PROJECT_LIST_TTL_MS.
+function invalidateProjectListCache() {
+  projectListCache = null;
 }
 
 // When the agent omits `project`, fall back to whatever the user has
@@ -561,8 +811,75 @@ async function getJson<T>(url: string): Promise<T> {
   return (await resp.json()) as T;
 }
 
-async function getFile(baseUrl: string, project: string, relPath: string, active: ActiveContext | null, resolved?: ResolvedProject | null, offset = 0, limit = 2000) {
-  const segments = String(relPath)
+async function sendJson(method, url, body) {
+  const resp = await fetch(url, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    const text = await safeText(resp);
+    throw new Error(`daemon ${resp.status} on ${url}: ${text || resp.statusText}`);
+  }
+  // 204 No Content is rare here but handle it gracefully so callers
+  // don't choke on JSON.parse('').
+  if (resp.status === 204) return { ok: true };
+  return await resp.json();
+}
+
+const postJson = (url, body) => sendJson('POST', url, body);
+const patchJson = (url, body) => sendJson('PATCH', url, body);
+const deleteJson = (url) => sendJson('DELETE', url, undefined);
+
+// Server-side validator is /^[A-Za-z0-9._-]{1,128}$/. We slug names by
+// lowercasing, replacing whitespace with `-`, dropping anything outside
+// the allow-set, and trimming leading/trailing separators. On collision
+// (rare for human names) the daemon would 400; we suffix a 6-hex random
+// segment to avoid forcing the caller to retry.
+function slugifyName(name) {
+  const base = String(name)
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^a-z0-9.\-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '');
+  return base.slice(0, 96) || 'project';
+}
+
+async function pickProjectId(baseUrl, explicitId, name) {
+  if (typeof explicitId === 'string' && explicitId.length > 0) {
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(explicitId)) {
+      throw new Error('id must match /^[A-Za-z0-9._-]{1,128}$/');
+    }
+    return explicitId;
+  }
+  const slug = slugifyName(name);
+  // Direct un-cached fetch: MCP server handles tool calls concurrently,
+  // so a write_file dispatched right after create_project can race with
+  // pickProjectId's lookup. If we used the shared fetchProjectList()
+  // here, the cache it populated *before* the create would survive
+  // the create's POST and serve the writer a stale list. Bypass the
+  // cache entirely for the collision check.
+  let list;
+  try {
+    const data = await getJson(`${baseUrl}/api/projects`);
+    list = Array.isArray(data?.projects) ? data.projects : [];
+  } catch {
+    return slug;
+  }
+  const taken = new Set(list.map((p) => p.id));
+  if (!taken.has(slug)) return slug;
+  for (let i = 0; i < 5; i++) {
+    const suffix = Math.floor(Math.random() * 0xffffff)
+      .toString(16)
+      .padStart(6, '0');
+    const candidate = `${slug.slice(0, 96 - 7)}-${suffix}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  throw new Error('could not find an unused project id; pass id="..." explicitly.');
+}
+
+async function getFile(baseUrl: string, project: string, relPath: string, active: ActiveContext | null, resolved?: ResolvedProject | null, offset = 0, limit = 2000) {  const segments = String(relPath)
     .split('/')
     .filter((s) => s.length > 0)
     .map(encodeURIComponent);
