@@ -9978,6 +9978,14 @@ export async function startServer({
 
   });
 
+  // SPA fallback: serve index.html for any non-API route not matched above
+  if (fs.existsSync(STATIC_DIR)) {
+    const spaIndex = path.join(STATIC_DIR, 'index.html');
+    if (fs.existsSync(spaIndex)) {
+      app.get('*', (_req, res) => res.sendFile(spaIndex));
+    }
+  }
+
   // Wait for `listen` to bind so callers always see the resolved URL —
   // critical when port=0 (ephemeral port) and when the embedding sidecar
   // needs to advertise the port to a parent process before any request
