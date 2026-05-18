@@ -1549,11 +1549,12 @@ async function getJson<T>(url: string): Promise<T> {
   return (await resp.json()) as T;
 }
 
-async function sendJson(method, url, body) {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function sendJson(method: string, url: string, body?: unknown): Promise<any> {
   const resp = await fetch(url, {
     method,
     headers: { 'content-type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   if (!resp.ok) {
     const text = await safeText(resp);
@@ -1565,16 +1566,16 @@ async function sendJson(method, url, body) {
   return await resp.json();
 }
 
-const postJson = (url, body) => sendJson('POST', url, body);
-const patchJson = (url, body) => sendJson('PATCH', url, body);
-const deleteJson = (url) => sendJson('DELETE', url, undefined);
+const postJson = (url: string, body?: unknown) => sendJson('POST', url, body);
+const patchJson = (url: string, body?: unknown) => sendJson('PATCH', url, body);
+const deleteJson = (url: string) => sendJson('DELETE', url, undefined);
 
 // Server-side validator is /^[A-Za-z0-9._-]{1,128}$/. We slug names by
 // lowercasing, replacing whitespace with `-`, dropping anything outside
 // the allow-set, and trimming leading/trailing separators. On collision
 // (rare for human names) the daemon would 400; we suffix a 6-hex random
 // segment to avoid forcing the caller to retry.
-function slugifyName(name) {
+function slugifyName(name: string): string {
   const base = String(name)
     .toLowerCase()
     .replace(/[\s_]+/g, '-')
@@ -1584,7 +1585,7 @@ function slugifyName(name) {
   return base.slice(0, 96) || 'project';
 }
 
-async function pickProjectId(baseUrl, explicitId, name) {
+async function pickProjectId(baseUrl: string, explicitId: unknown, name: string): Promise<string> {
   if (typeof explicitId === 'string' && explicitId.length > 0) {
     if (!/^[A-Za-z0-9._-]{1,128}$/.test(explicitId)) {
       throw new Error('id must match /^[A-Za-z0-9._-]{1,128}$/');
@@ -1600,12 +1601,12 @@ async function pickProjectId(baseUrl, explicitId, name) {
   // cache entirely for the collision check.
   let list;
   try {
-    const data = await getJson(`${baseUrl}/api/projects`);
+    const data = await getJson(`${baseUrl}/api/projects`) as any;
     list = Array.isArray(data?.projects) ? data.projects : [];
   } catch {
     return slug;
   }
-  const taken = new Set(list.map((p) => p.id));
+  const taken = new Set(list.map((p: any) => p.id));
   if (!taken.has(slug)) return slug;
   for (let i = 0; i < 5; i++) {
     const suffix = Math.floor(Math.random() * 0xffffff)
