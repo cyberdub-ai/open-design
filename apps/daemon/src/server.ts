@@ -2514,6 +2514,7 @@ export interface StartServerOptions {
   host?: string;
   port?: number;
   returnServer?: boolean;
+  runtime?: unknown;
 }
 
 const DEFAULT_CHAT_RUN_INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;
@@ -3676,7 +3677,27 @@ export async function startServer({
     FinalizeUpstreamError,
     redactSecrets,
   };
-  const validationDeps = { isSafeId, validateExternalApiBaseUrl, validateBaseUrl };
+  function isProjectUsableDesignSystem(summary: { status?: string } | null | undefined) {
+    return summary?.status !== 'draft';
+  }
+
+  async function validateProjectDesignSystemId(id: unknown): Promise<{ ok: true; id: string | null } | { ok: false; code: string; message: string }> {
+    if (id === undefined || id === null || id === '') return { ok: true, id: null };
+    if (typeof id !== 'string') {
+      return { ok: false, code: 'INVALID_DESIGN_SYSTEM', message: 'designSystemId must be a string or null' };
+    }
+    const systems = await listAllDesignSystems();
+    const summary = systems.find((system) => system.id === id);
+    if (!summary) {
+      return { ok: false, code: 'DESIGN_SYSTEM_NOT_FOUND', message: 'design system not found' };
+    }
+    if (!isProjectUsableDesignSystem(summary)) {
+      return { ok: false, code: 'DESIGN_SYSTEM_NOT_PUBLISHED', message: 'draft design systems cannot be used by projects' };
+    }
+    return { ok: true, id };
+  }
+
+  const validationDeps = { isSafeId, validateExternalApiBaseUrl, validateBaseUrl, validateProjectDesignSystemId };
   const agentDeps = {
     listProviderModels,
     testProviderConnection,
@@ -3718,6 +3739,7 @@ export async function startServer({
     events: projectEventDeps,
     ids: idDeps,
     telemetry: { reportFinalizedMessage },
+    validation: validationDeps,
   });
   registerImportRoutes(app, {
     db,
@@ -3731,6 +3753,7 @@ export async function startServer({
     projectStore: projectStoreDeps,
     conversations: conversationDeps,
     projectFiles: projectFileDeps,
+    validation: validationDeps,
   });
 
   // Resource catalog
