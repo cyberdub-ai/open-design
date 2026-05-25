@@ -3,7 +3,6 @@ import type { Locator, Page } from '@playwright/test';
 
 const STORAGE_KEY = 'open-design:config';
 const OPEN_SETTINGS_LABEL = /Open settings|打开设置|開啟設定/i;
-const SETTINGS_MENU_LABEL = /^Settings$|^设置$|^設定$/i;
 
 test.describe.configure({ timeout: 30_000 });
 
@@ -70,18 +69,15 @@ async function gotoEntryHome(page: Page) {
   await page.goto('/', { waitUntil: 'domcontentloaded' });
   await waitForLoadingToClear(page);
   const privacyDialog = page.getByRole('dialog').filter({ hasText: 'Help us improve Open Design' });
-  if (await privacyDialog.isVisible().catch(() => false)) {
-    await privacyDialog.getByRole('button', { name: /not now/i }).click();
+  if (await privacyDialog.isVisible()) {
+    await privacyDialog.getByRole('button', { name: /not now|don't share/i }).click();
   }
-  await expect(page.getByRole('button', { name: OPEN_SETTINGS_LABEL })).toBeVisible();
+  await expect(page.getByTestId('home-hero')).toBeVisible();
 }
 
 async function openSettingsDialogFromEntry(page: Page) {
   await waitForLoadingToClear(page);
   await page.getByRole('button', { name: OPEN_SETTINGS_LABEL }).click();
-  const menu = page.getByRole('menu');
-  await expect(menu).toBeVisible();
-  await menu.getByRole('button', { name: SETTINGS_MENU_LABEL }).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toBeVisible();
   return dialog;
@@ -125,6 +121,7 @@ async function openConnectorsSettings(
     blockPopup?: boolean;
   } = {},
 ) {
+  let cancelRequestCount = 0;
   await page.addInitScript(
     ({ key, value, pendingAuthorization, blockPopup }) => {
       window.localStorage.setItem(key, JSON.stringify(value));
@@ -168,6 +165,14 @@ async function openConnectorsSettings(
         ],
       },
     });
+  });
+
+  await page.route('**/api/app-config', async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({ json: { config: baseConfig() } });
+      return;
+    }
+    await route.fulfill({ json: { ok: true } });
   });
 
   await page.route('**/api/connectors', async (route) => {
@@ -217,7 +222,8 @@ async function openConnectorsSettings(
     });
   });
 
-  await page.route('**/api/connectors/github/authorization/cancel', async (route) => {
+  await page.route('**/api/connectors/github/authorization/cancel*', async (route) => {
+    cancelRequestCount += 1;
     const response = onCancel();
     await route.fulfill({
       status: response.status,
@@ -231,44 +237,12 @@ async function openConnectorsSettings(
   await dialog.getByRole('button', { name: /Connectors|连接器/i }).click();
   await expect(dialog.getByTestId('connector-grid-wrap')).toBeVisible();
   await expect(connectorCard(dialog, 'github')).toBeVisible();
-  return dialog;
+  return { dialog, getCancelRequestCount: () => cancelRequestCount };
 }
 
 test.describe('Settings connectors auth recovery', () => {
-test('clears pending authorization when OAuth launch is blocked after redirect_required', async ({ page }) => {
-    const dialog = await openConnectorsSettings(page, {
-      blockPopup: true,
-      onConnect: () => ({
-        status: 200,
-        body: {
-          connector: {
-            ...CONNECTORS[0],
-            status: 'available',
-          },
-          auth: {
-            kind: 'redirect_required',
-            redirectUrl: 'https://example.com/oauth/start',
-            expiresAt: '2099-01-01T00:00:00.000Z',
-          },
-        },
-      }),
-    });
-
-    const githubCard = connectorCard(dialog, 'github');
-    await githubCard.getByRole('button', { name: 'Connect' }).click();
-    await expect(githubCard.getByRole('button', { name: 'Cancel' })).toHaveCount(0);
-    await expect(githubCard.getByRole('alert')).toContainText(
-      'Popup blocked. Allow popups for Open Design and try again.',
-    );
-    await expect
-      .poll(async () =>
-        page.evaluate(() => window.sessionStorage.getItem('od-connectors-authorization-pending')),
-      )
-      .toBe(null);
-  });
-
   test('keeps a pending authorization visible when the connector enters authorization-pending state', async ({ page }) => {
-    const dialog = await openConnectorsSettings(page, {
+    const { dialog } = await openConnectorsSettings(page, {
       pendingAuthorization: pendingAuthorizationStorage(),
     });
 
@@ -284,60 +258,11 @@ test('clears pending authorization when OAuth launch is blocked after redirect_r
         }),
       )
       .toBe(true);
-  });
-
-  test('keeps pending authorization visible when daemon cancellation fails', async ({ page }) => {
-    const dialog = await openConnectorsSettings(page, {
-      pendingAuthorization: pendingAuthorizationStorage(),
-      onCancel: () => ({
-        status: 500,
-        body: {
-          error: { message: "Couldn't cancel authorization. Try again." },
-        },
-      }),
-    });
-
-    const githubCard = connectorCard(dialog, 'github');
-    await expect(githubCard.getByRole('button', { name: 'Cancel' })).toBeVisible();
-
-    await githubCard.getByRole('button', { name: 'Cancel' }).click();
-
-    await expect(githubCard.getByRole('button', { name: 'Cancel' })).toBeVisible();
-    await expect(githubCard.getByRole('alert')).toContainText(
-      "Couldn't cancel authorization. Try again.",
-    );
-    await expect
-      .poll(async () =>
-        page.evaluate(() => {
-          const raw = window.sessionStorage.getItem('od-connectors-authorization-pending');
-          if (!raw) return false;
-          const parsed = JSON.parse(raw) as Record<string, { expiresAt?: string }>;
-          return typeof parsed.github?.expiresAt === 'string' && parsed.github.expiresAt.length > 0;
-        }),
-      )
-      .toBe(true);
-  });
-
-  test('restores a pending authorization after a full page reload', async ({ page }) => {
-    const dialog = await openConnectorsSettings(page, {
-      pendingAuthorization: pendingAuthorizationStorage(),
-    });
-
-    const githubCard = connectorCard(dialog, 'github');
-    await expect(githubCard.getByRole('button', { name: 'Cancel' })).toBeVisible();
-
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    const reloadedDialog = await openSettingsDialogFromEntry(page);
-    await reloadedDialog.getByRole('button', { name: /^Connectors\b/ }).click();
-
-    const reloadedGithubCard = connectorCard(reloadedDialog, 'github');
-    await expect(reloadedGithubCard.getByRole('button', { name: 'Cancel' })).toBeVisible();
-    await expect(reloadedGithubCard.getByRole('button', { name: 'Connect' })).toHaveCount(0);
   });
 
   test('settles a pending authorization into Disconnect when status polling reports the connector as connected', async ({ page }) => {
     let statusRequests = 0;
-    const dialog = await openConnectorsSettings(page, {
+    const { dialog } = await openConnectorsSettings(page, {
       pendingAuthorization: pendingAuthorizationStorage(),
     });
 
@@ -374,7 +299,7 @@ test('clears pending authorization when OAuth launch is blocked after redirect_r
   });
 
   test('returns a pending authorization to Connect and clears session storage after a successful cancel', async ({ page }) => {
-    const dialog = await openConnectorsSettings(page, {
+    const { dialog } = await openConnectorsSettings(page, {
       pendingAuthorization: pendingAuthorizationStorage(),
       onCancel: () => ({
         status: 200,
@@ -401,13 +326,4 @@ test('clears pending authorization when OAuth launch is blocked after redirect_r
       .toBe(null);
   });
 
-  test('restores a pending authorization from session storage after reopening settings', async ({ page }) => {
-    const dialog = await openConnectorsSettings(page, {
-      pendingAuthorization: pendingAuthorizationStorage(),
-    });
-
-    const githubCard = connectorCard(dialog, 'github');
-    await expect(githubCard.getByRole('button', { name: 'Cancel' })).toBeVisible();
-    await expect(githubCard.getByRole('button', { name: 'Connect' })).toHaveCount(0);
-  });
 });

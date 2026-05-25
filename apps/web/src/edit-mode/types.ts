@@ -63,6 +63,7 @@ export interface ManualEditTarget {
   attributes: Record<string, string>;
   styles: ManualEditStyles;
   isLayoutContainer: boolean;
+  isHidden?: boolean;
   outerHtml: string;
 }
 
@@ -70,6 +71,7 @@ export type ManualEditPatch =
   | { id: string; kind: 'set-text'; value: string }
   | { id: string; kind: 'set-link'; text: string; href: string }
   | { id: string; kind: 'set-image'; src: string; alt: string }
+  | { id: string; kind: 'remove-element' }
   | { kind: 'set-token'; token: string; value: string }
   | { id: string; kind: 'set-style'; styles: Partial<ManualEditStyles> }
   | { id: string; kind: 'set-attributes'; attributes: Record<string, string> }

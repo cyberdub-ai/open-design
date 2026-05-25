@@ -6,6 +6,7 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ANNOTATION_EVENT } from '../../src/components/PreviewDrawOverlay';
 
 const { saveTemplateMock } = vi.hoisted(() => ({
   saveTemplateMock: vi.fn(),
@@ -238,7 +239,7 @@ describe('FileViewer SVG artifacts', () => {
     expect(markup).toContain('class="viewer svg-viewer"');
     expect(markup).not.toContain('class="viewer image-viewer"');
     expect(markup).toContain('Preview');
-    expect(markup).toContain('Source');
+    expect(markup).toContain('Code');
     expect(markup).toContain('src="/api/projects/project-1/raw/diagram.svg?v=1710000000&amp;r=0"');
   });
 
@@ -338,11 +339,11 @@ describe('FileViewer SVG artifacts', () => {
     );
 
     expect(previewMarkup).toContain('class="viewer-tab active" aria-pressed="true">Preview</button>');
-    expect(previewMarkup).toContain('aria-pressed="false">Source</button>');
+    expect(previewMarkup).toContain('aria-pressed="false">Code</button>');
     expect(previewMarkup).toContain('<img');
 
     expect(sourceMarkup).toContain('aria-pressed="false">Preview</button>');
-    expect(sourceMarkup).toContain('class="viewer-tab active" aria-pressed="true">Source</button>');
+    expect(sourceMarkup).toContain('class="viewer-tab active" aria-pressed="true">Code</button>');
     expect(sourceMarkup).toContain('class="viewer-source"');
     expect(sourceMarkup).not.toContain('<img');
   });
@@ -367,6 +368,10 @@ describe('FileViewer SVG artifacts', () => {
       <FileViewer projectId="project-1" projectKind="prototype" file={file} liveHtml="<html><body>hi</body></html>" />,
     );
 
+    // Both iframes are always mounted (the lazy srcDoc transport avoids
+    // booting the artifact in the inactive frame). `data-od-active` and
+    // the testid pair identify which iframe is currently the user-facing
+    // one without unmounting either side.
     expect(markup).toContain('data-testid="artifact-preview-frame"');
     expect(markup).toContain('data-od-render-mode="url-load"');
     expect(markup).toContain('data-od-render-mode="url-load" data-od-active="true"');
@@ -428,6 +433,60 @@ describe('FileViewer SVG artifacts', () => {
       const activations = srcDocActivationMessages(postMessageSpy.mock.calls);
       expect(activations.at(-1)?.html).toContain('__odArtifactBootCount');
       expect(activations.at(-1)?.html).toContain('data-od-selection-bridge');
+      expect(activations.at(-1)?.html).toContain('data-od-preview-focus-guard');
+    });
+  });
+
+  it('reactivates the srcDoc transport after switching source back to preview', async () => {
+    const file = baseFile({
+      name: 'page.html',
+      path: 'page.html',
+      mime: 'text/html',
+      kind: 'html',
+      artifactManifest: {
+        version: 1,
+        kind: 'html',
+        title: 'Page',
+        entry: 'page.html',
+        renderer: 'html',
+        exports: ['html'],
+      },
+    });
+
+    render(
+      <FileViewer
+        projectId="project-1"
+        projectKind="prototype"
+        file={file}
+        liveHtml='<html><body><main data-od-id="hero">Hero</main></body></html>'
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId('inspect-mode-toggle'));
+
+    await waitFor(() => {
+      const activeFrame = screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement;
+      expect(activeFrame.getAttribute('data-od-render-mode')).toBe('srcdoc');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Code' }));
+    expect(screen.queryByTestId('artifact-preview-frame')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Code' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Preview' }));
+
+    const remountedFrame = screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement;
+    const postMessageSpy = vi.spyOn(remountedFrame.contentWindow!, 'postMessage');
+
+    await waitFor(() => {
+      const activeFrame = screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement;
+      expect(activeFrame.getAttribute('data-od-render-mode')).toBe('srcdoc');
+    });
+    await waitFor(() => {
+      const activations = srcDocActivationMessages(postMessageSpy.mock.calls);
+      expect(activations.at(-1)?.html).toContain('data-od-selection-bridge');
+      expect(activations.at(-1)?.html).toContain('Hero');
     });
   });
 
@@ -553,6 +612,73 @@ describe('FileViewer SVG artifacts', () => {
     expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-downloads');
   });
 
+  it('points a .jsx module loaded by a sibling HTML to that entry, not the React error (issue #2744)', async () => {
+    const file = baseFile({
+      name: 'icons.jsx',
+      path: 'icons.jsx',
+      mime: 'text/jsx',
+      kind: 'code',
+      artifactManifest: {
+        version: 1,
+        kind: 'react-component',
+        title: 'icons',
+        entry: 'icons.jsx',
+        renderer: 'react-component',
+        exports: ['jsx'],
+      },
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request) => {
+        const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
+        if (url === '/api/projects/project-1/files') {
+          return new Response(
+            JSON.stringify({
+              files: [
+                { name: 'icons.jsx', path: 'icons.jsx' },
+                { name: 'backups.html', path: 'backups.html' },
+              ],
+            }),
+          );
+        }
+        if (url === '/api/projects/project-1/raw/backups.html') {
+          return new Response('<script type="text/babel" src="icons.jsx"></script>');
+        }
+        if (url === '/api/projects/project-1/raw/icons.jsx') {
+          return new Response('window.I = { star: null };');
+        }
+        return new Response('', { status: 404 });
+      }),
+    );
+
+    const onOpenFileReplacing = vi.fn();
+    const { container } = render(
+      <FileViewer
+        projectId="project-1"
+        projectKind="prototype"
+        file={file}
+        onOpenFileReplacing={onOpenFileReplacing}
+      />,
+    );
+
+    // The module points at its HTML entry instead of rendering the React
+    // runtime (which would throw "No React component export found").
+    const link = await screen.findByRole('button', { name: /backups\.html/ });
+    expect(screen.queryByTestId('react-component-preview-frame')).toBeNull();
+
+    // The toolbar still offers a way to read the raw code: clicking the Code
+    // tab swaps the pointer for the file's source. Issue #2744 follow-up.
+    fireEvent.click(screen.getByRole('button', { name: /^code$/i }));
+    expect(container.textContent).toContain('window.I');
+    expect(screen.queryByRole('button', { name: /backups\.html/ })).toBeNull();
+
+    // Back on Preview, clicking the entry opens the HTML page and closes the
+    // dead-end module tab (icons.jsx) in one move.
+    fireEvent.click(screen.getByRole('button', { name: /preview/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /backups\.html/ }));
+    expect(onOpenFileReplacing).toHaveBeenCalledWith('backups.html', 'icons.jsx');
+  });
+
   it('keeps decks on the srcDoc path so the deck postMessage bridge can run', () => {
     const file = baseFile({
       name: 'deck.html',
@@ -640,7 +766,8 @@ describe('FileViewer SVG artifacts', () => {
     expect(container.querySelector('.palette-tweaks-anchor')).toBeTruthy();
     expect(container.querySelector('.viewer-viewport-switcher')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /^source$/i }));
+    fireEvent.click(container.querySelector('.viewer-mode-trigger')!);
+    fireEvent.click(screen.getByRole('menuitem', { name: /code/i }));
 
     await waitFor(() => {
       expect(container.querySelector('.deck-nav')).toBeNull();
@@ -649,8 +776,9 @@ describe('FileViewer SVG artifacts', () => {
       expect(screen.getByTestId('manual-edit-mode-toggle')).toBeTruthy();
       expect(screen.queryByTestId('draw-overlay-toggle')).toBeNull();
       expect(screen.queryByTestId('palette-tweaks-toggle')).toBeNull();
-      expect(screen.getByRole('button', { name: /zoom out/i })).toBeTruthy();
-      expect(screen.getByRole('button', { name: /zoom in/i })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: /100%/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: /zoom out/i })).toBeNull();
+      expect(screen.queryByRole('button', { name: /zoom in/i })).toBeNull();
     });
   });
 
@@ -694,6 +822,102 @@ describe('FileViewer SVG artifacts', () => {
     expect(screen.queryByText(/generates a Pages project name automatically/i)).toBeNull();
     expect(screen.queryByText(/project name is selected automatically/i)).toBeNull();
     expect(screen.queryByLabelText('Pages project name')).toBeNull();
+  });
+
+  it('nudges the share button once when an artifact becomes exportable', async () => {
+    const file = baseFile({
+      name: 'nudge.html',
+      path: 'nudge.html',
+      mime: 'text/html',
+      kind: 'html',
+      artifactManifest: {
+        version: 1,
+        kind: 'html',
+        title: 'Nudge',
+        entry: 'nudge.html',
+        renderer: 'html',
+        exports: ['html'],
+      },
+    });
+
+    render(
+      <FileViewer
+        projectId="project-nudge"
+        projectKind="prototype"
+        file={file}
+        liveHtml="<html><body><h1>Ready</h1></body></html>"
+      />,
+    );
+
+    const exportButton = screen.getByRole('button', { name: /share/i });
+    await waitFor(() => {
+      expect(exportButton.classList.contains('export-ready-nudge')).toBe(true);
+    });
+
+    fireEvent.click(exportButton);
+
+    expect(exportButton.classList.contains('export-ready-nudge')).toBe(false);
+  });
+
+  it('nudges each exportable artifact once when the mounted viewer switches files', async () => {
+    const firstFile = baseFile({
+      name: 'nudge-first.html',
+      path: 'nudge-first.html',
+      mime: 'text/html',
+      kind: 'html',
+      artifactManifest: {
+        version: 1,
+        kind: 'html',
+        title: 'First',
+        entry: 'nudge-first.html',
+        renderer: 'html',
+        exports: ['html'],
+      },
+    });
+    const secondFile = baseFile({
+      name: 'nudge-second.html',
+      path: 'nudge-second.html',
+      mime: 'text/html',
+      kind: 'html',
+      artifactManifest: {
+        version: 1,
+        kind: 'html',
+        title: 'Second',
+        entry: 'nudge-second.html',
+        renderer: 'html',
+        exports: ['html'],
+      },
+    });
+
+    const { rerender } = render(
+      <FileViewer
+        projectId="project-nudge-switch"
+        projectKind="prototype"
+        file={firstFile}
+        liveHtml="<html><body><h1>First</h1></body></html>"
+      />,
+    );
+
+    const firstExportButton = screen.getByRole('button', { name: /share/i });
+    await waitFor(() => {
+      expect(firstExportButton.classList.contains('export-ready-nudge')).toBe(true);
+    });
+    fireEvent.click(firstExportButton);
+    expect(firstExportButton.classList.contains('export-ready-nudge')).toBe(false);
+
+    rerender(
+      <FileViewer
+        projectId="project-nudge-switch"
+        projectKind="prototype"
+        file={secondFile}
+        liveHtml="<html><body><h1>Second</h1></body></html>"
+      />,
+    );
+
+    const secondExportButton = screen.getByRole('button', { name: /share/i });
+    await waitFor(() => {
+      expect(secondExportButton.classList.contains('export-ready-nudge')).toBe(true);
+    });
   });
 
   it('keeps the explicitly selected deploy provider when another provider already has a deployment', async () => {
@@ -1217,6 +1441,37 @@ describe('FileViewer tweaks toolbar', () => {
     expect(screen.queryByPlaceholderText('Type anywhere to add a note')).toBeNull();
   });
 
+  it('shows an inspect notice when a clicked child resolves to an annotated ancestor', async () => {
+    render(
+      <FileViewer projectId="project-1" projectKind="prototype" file={htmlPreviewFile()}
+        liveHtml='<html><body><main data-od-id="hero"><h1>Hero</h1></main></body></html>'
+      />,
+    );
+
+    const frame = screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement;
+    fireEvent.click(screen.getByTestId('inspect-mode-toggle'));
+
+    window.dispatchEvent(new MessageEvent('message', {
+      source: frame.contentWindow,
+      data: {
+        type: 'od:comment-target',
+        elementId: 'hero',
+        selector: '[data-od-id="hero"]',
+        label: 'main',
+        text: 'Hero',
+        style: {},
+        clickedDescendant: {
+          label: 'h1',
+          text: 'Hero',
+        },
+      },
+    }));
+
+    const notice = await screen.findByTestId('inspect-ancestor-notice');
+    expect(notice.textContent).toContain('You clicked h1');
+    expect(notice.textContent).toContain('Editing main instead');
+  });
+
   it('keeps the Draw bar open after queueing an annotation', () => {
     render(
       <FileViewer projectId="project-1" projectKind="prototype" file={htmlPreviewFile()}
@@ -1266,7 +1521,10 @@ describe('FileViewer tweaks toolbar', () => {
     expect((screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement).srcdoc).toBe(initialSrcDoc);
   });
 
-  it('disables Draw direct send while a task is running but keeps queue available', () => {
+  it('lets Draw direct send emit a queued annotation while a task is running', async () => {
+    const annotationSpy = vi.fn();
+    window.addEventListener(ANNOTATION_EVENT, annotationSpy);
+
     render(
       <FileViewer projectId="project-1" projectKind="prototype" file={htmlPreviewFile()}
         liveHtml='<html><body><main data-od-id="hero">Hero</main></body></html>'
@@ -1281,8 +1539,20 @@ describe('FileViewer tweaks toolbar', () => {
 
     const queue = screen.getByRole('button', { name: 'Queue' }) as HTMLButtonElement;
     expect(queue.disabled).toBe(false);
-    expect(screen.queryByRole('button', { name: 'Send' })).toBeNull();
-    expect(screen.queryByText('Queues while working')).toBeNull();
+    const send = screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+
+    fireEvent.click(send);
+
+    await waitFor(() => expect(annotationSpy).toHaveBeenCalledTimes(1));
+    expect(annotationSpy.mock.calls[0]?.[0]).toMatchObject({
+      detail: {
+        action: 'send',
+        note: 'mark this',
+        filePath: 'preview.html',
+      },
+    });
+    window.removeEventListener(ANNOTATION_EVENT, annotationSpy);
   });
 
   it('hides non-open saved comments from preview markers when the side panel is empty', () => {
@@ -1337,11 +1607,15 @@ describe('FileViewer tweaks toolbar', () => {
       'comment-side-panel-open',
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /hide comments/i }));
+    const closeButton = screen
+      .getByTestId('comment-side-panel')
+      .querySelector<HTMLButtonElement>('.comment-side-close');
+    expect(closeButton).toBeTruthy();
+    fireEvent.click(closeButton!);
 
-    expect(screen.getByTestId('inspect-empty-hint-container').className).not.toContain(
-      'comment-side-panel-open',
-    );
+    expect(screen.queryByTestId('comment-side-panel')).toBeNull();
+    expect(screen.queryByTestId('comment-side-collapsed-rail')).toBeNull();
+    expect(screen.queryByTestId('inspect-empty-hint-container')).toBeNull();
   });
 
   it('keeps saved comment marker numbers aligned with the side panel order', () => {
@@ -1491,12 +1765,14 @@ describe('FileViewer tweaks toolbar', () => {
     expect(screen.queryByText('Do not recreate this stale comment')).toBeNull();
   });
 
-  it('collapses the comment side panel into a narrow reopen rail', () => {
+  it('closes the comment side panel from the header close button', () => {
     const onCollapseChange = vi.fn();
+    const onClose = vi.fn();
 
     function Harness() {
       const [collapsed, setCollapsed] = useState(false);
-      return (
+      const [open, setOpen] = useState(true);
+      return open ? (
         <CommentSidePanel
           comments={[
             {
@@ -1522,6 +1798,10 @@ describe('FileViewer tweaks toolbar', () => {
             onCollapseChange(next);
             setCollapsed(next);
           }}
+          onClose={() => {
+            onClose();
+            setOpen(false);
+          }}
           onToggleSelect={() => {}}
           onClearSelection={() => {}}
           onReply={() => {}}
@@ -1529,7 +1809,7 @@ describe('FileViewer tweaks toolbar', () => {
           sending={false}
           t={t}
         />
-      );
+      ) : null;
     }
 
     render(<Harness />);
@@ -1537,16 +1817,148 @@ describe('FileViewer tweaks toolbar', () => {
     expect(screen.getByTestId('comment-side-panel')).toBeTruthy();
     expect(screen.getByText('不要github，换成微信')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /hide comments/i }));
+    fireEvent.click(screen.getByRole('button', { name: /close/i }));
 
-    expect(onCollapseChange).toHaveBeenLastCalledWith(true);
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(onCollapseChange).not.toHaveBeenCalled();
     expect(screen.queryByText('不要github，换成微信')).toBeNull();
     expect(screen.queryByTestId('comment-side-selectbar')).toBeNull();
-    expect(screen.getByTestId('comment-side-collapsed-rail')).toBeTruthy();
+    expect(screen.queryByTestId('comment-side-collapsed-rail')).toBeNull();
+  });
 
-    fireEvent.click(screen.getByRole('button', { name: /show comments/i }));
+  // PR #1643 regression: the once-per-file guard that mirrors a `.twk-panel`
+  // artifact's default-open state into the toolbar `tweaksMode` lives in a
+  // message-event listener that previously had an empty deps array. The
+  // handler therefore closed over the first-render `file.name`, so switching
+  // to a second `.twk-panel` file left the guard comparing against the
+  // stale captured name and never re-mirrored the new artifact's open state
+  // back to ON. Surfaced by Siri-Ray in
+  // https://github.com/nexu-io/open-design/pull/1643#discussion_r3266838151.
+  it('mirrors __edit_mode_available default-open state for each switched-to .twk-panel file', async () => {
+    function twkFile(name: string): ProjectFile {
+      return baseFile({
+        name,
+        path: name,
+        mime: 'text/html',
+        kind: 'html',
+        artifactManifest: {
+          version: 1,
+          kind: 'html',
+          title: name,
+          entry: name,
+          renderer: 'html',
+          exports: ['html'],
+        },
+      });
+    }
 
-    expect(onCollapseChange).toHaveBeenLastCalledWith(false);
+    function Switcher() {
+      const [file, setFile] = useState<ProjectFile>(twkFile('first.html'));
+      return (
+        <div>
+          <button type="button" onClick={() => setFile(twkFile('second.html'))}>
+            Switch file
+          </button>
+          <FileViewer
+            projectId="project-1"
+            projectKind="prototype"
+            file={file}
+            liveHtml='<html><body><main data-od-id="hero">Hero</main></body></html>'
+          />
+        </div>
+      );
+    }
+
+    render(<Switcher />);
+
+    const firstFrame = screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement;
+    const tweaksButton = () =>
+      Array.from(document.querySelectorAll('button')).find(
+        (b) => b.getAttribute('title') === 'Tweaks' || b.getAttribute('aria-label') === 'Tweaks',
+      ) as HTMLButtonElement | undefined;
+
+    // First file: artifact posts __edit_mode_available → toolbar starts ON.
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        source: firstFrame.contentWindow,
+        data: { type: '__edit_mode_available' },
+      }),
+    );
+    await waitFor(() => expect(tweaksButton()?.getAttribute('aria-pressed')).toBe('true'));
+
+    // User toggles OFF on first file.
+    fireEvent.click(tweaksButton()!);
+    await waitFor(() => expect(tweaksButton()?.getAttribute('aria-pressed')).toBe('false'));
+
+    // Switch to second file. The second artifact also mounts panel-visible
+    // and emits __edit_mode_available. The toolbar must mirror that into ON
+    // again — the bug was that the handler kept comparing against the first
+    // file's name in a stale closure, so the second emission was treated as
+    // a "second emission for the same file" and the OFF state stuck.
+    fireEvent.click(screen.getByRole('button', { name: 'Switch file' }));
+    const secondFrame = screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement;
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        source: secondFrame.contentWindow,
+        data: { type: '__edit_mode_available' },
+      }),
+    );
+    await waitFor(() => expect(tweaksButton()?.getAttribute('aria-pressed')).toBe('true'));
+  });
+
+  // PR #1643 regression: Protocol A in `design-templates/tweaks/SKILL.md`
+  // says the artifact MAY declare a default-closed panel via
+  // `{ type: '__edit_mode_available', visible: false }`. The handler used
+  // to unconditionally mirror availability into `tweaksMode = true`, so a
+  // default-closed dynamic artifact would be force-opened by the next
+  // `syncBridgeModes` posting `__activate_edit_mode`. The host must now
+  // read `visible` and only flip to ON when the panel reports itself open
+  // (or omits `visible` — back-compat shim for the common open-by-default
+  // case). Surfaced by Siri-Ray in
+  // https://github.com/nexu-io/open-design/pull/1643#discussion_r3269955351.
+  it('respects __edit_mode_available { visible: false } for default-closed dynamic artifacts', async () => {
+    const file = baseFile({
+      name: 'closed.html',
+      path: 'closed.html',
+      mime: 'text/html',
+      kind: 'html',
+      artifactManifest: {
+        version: 1,
+        kind: 'html',
+        title: 'closed',
+        entry: 'closed.html',
+        renderer: 'html',
+        exports: ['html'],
+      },
+    });
+
+    render(
+      <FileViewer
+        projectId="project-1"
+        projectKind="prototype"
+        file={file}
+        liveHtml='<html><body><main data-od-id="hero">Hero</main></body></html>'
+      />,
+    );
+
+    const frame = screen.getByTestId('artifact-preview-frame') as HTMLIFrameElement;
+    const tweaksButton = () =>
+      Array.from(document.querySelectorAll('button')).find(
+        (b) => b.getAttribute('title') === 'Tweaks' || b.getAttribute('aria-label') === 'Tweaks',
+      ) as HTMLButtonElement | undefined;
+
+    // Artifact announces availability AND declares the panel is currently
+    // closed. The toolbar must enable (panel exists) but stay OFF — opening
+    // it without intent would override the artifact-declared default.
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        source: frame.contentWindow,
+        data: { type: '__edit_mode_available', visible: false },
+      }),
+    );
+
+    await waitFor(() => expect(tweaksButton()?.disabled).toBe(false));
+    expect(tweaksButton()?.getAttribute('aria-pressed')).toBe('false');
   });
 });
 
@@ -2099,6 +2511,13 @@ function baseLiveArtifactWorkspaceEntry(
 }
 
 describe('LiveArtifactViewer', () => {
+  it('hides inactive live previews even when a device viewport sets display', () => {
+    const css = readFileSync(join(process.cwd(), 'src/index.css'), 'utf8');
+    const rule = css.match(/\.live-artifact-preview-layer\.preview-viewport\[data-active='false'\]\s*\{[^}]+\}/)?.[0] ?? '';
+
+    expect(rule).toContain('display: none;');
+  });
+
   it('keeps the presentation exit button aligned with preview chrome spacing', () => {
     const css = readFileSync(join(process.cwd(), 'src/index.css'), 'utf8');
     const rule = css.match(/\.present-exit\s*\{[^}]+\}/)?.[0] ?? '';
@@ -2359,6 +2778,52 @@ describe('LiveArtifactViewer', () => {
     await waitFor(() => {
       expect(screen.getByRole('link', { name: /^open$/i }).getAttribute('tabindex')).not.toBe('-1');
     });
+  });
+
+  it('keeps the live preview iframe mounted across viewport and tab changes', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof Request ? input.url : String(input);
+      if (url === '/api/live-artifacts/la_1?projectId=proj_1') {
+        return new Response(JSON.stringify({ artifact: baseLiveArtifact() }), { status: 200 });
+      }
+      if (url === '/api/live-artifacts/la_1/refreshes?projectId=proj_1') {
+        return new Response(JSON.stringify({ refreshes: [] }), { status: 200 });
+      }
+      if (url === '/api/live-artifacts/la_1/code?projectId=proj_1&variant=template') {
+        return new Response('<main>Preview</main>', { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 404 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(
+      <LiveArtifactViewer
+        projectId="proj_1"
+        liveArtifact={baseLiveArtifactWorkspaceEntry()}
+      />,
+    );
+
+    const frame = await screen.findByTestId('live-artifact-preview-frame');
+    fireEvent.click(screen.getByRole('button', { name: /preview viewport/i }));
+    fireEvent.click(screen.getByRole('option', { name: /mobile/i }));
+
+    const previewLayer = frame.closest('.live-artifact-preview-layer');
+    expect(previewLayer?.classList.contains('preview-viewport-mobile')).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: /code/i }));
+
+    await waitFor(() => {
+      expect(previewLayer?.getAttribute('data-active')).toBe('false');
+    });
+    expect(screen.getByTestId('live-artifact-preview-frame')).toBe(frame);
+
+    fireEvent.click(screen.getByRole('button', { name: /preview/i }));
+
+    await waitFor(() => {
+      expect(previewLayer?.getAttribute('data-active')).toBe('true');
+    });
+    expect(screen.getByTestId('live-artifact-preview-frame')).toBe(frame);
+    expect(frame.getAttribute('src')).toBe('/api/live-artifacts/la_1/preview?projectId=proj_1&v=0');
   });
 
   it('closes the present menu on Escape without tearing down the viewer', async () => {

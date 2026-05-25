@@ -40,6 +40,12 @@ import {
   cursorAuthGuidance,
   probeAgentAuthStatus,
 } from './runtimes/auth.js';
+import {
+  buildLegacyMaxTokensParam,
+  buildMaxCompletionTokensParam,
+  buildOpenAIChatTokenParam,
+  isUnsupportedMaxTokensError,
+} from './openai-chat-token-params.js';
 import type { AgentCliEnvPrefs } from './app-config.js';
 import type { RuntimeAgentDef } from './runtimes/types.js';
 import {
@@ -54,6 +60,7 @@ import {
   type ParsedBaseUrl,
   type ProviderTestRequest,
 } from '@open-design/contracts/api/connectionTest';
+import { googleGenerateContentUrl } from './google-models.js';
 
 export { validateBaseUrl } from '@open-design/contracts/api/connectionTest';
 
@@ -117,6 +124,41 @@ export async function validateBaseUrlResolved(
   }
 
   return sync;
+}
+
+/**
+ * SSRF guard for asset URLs handed back inside a successful API
+ * response — typically a `data.url` or `data.video_url` that points
+ * at the gateway's CDN, but is attacker-controllable when the
+ * upstream gateway is compromised or misconfigured. Routes the URL
+ * through `validateBaseUrlResolved` (DNS-resolve → reject loopback,
+ * RFC1918, link-local, CGNAT, metadata-service IPs) and returns a
+ * discriminated union so callers don't have to repeat the
+ * `validated.error || !validated.parsed` plumbing.
+ *
+ * Two callers today:
+ *   - `byok-tools.ts` for the chat-tool image/video downloads
+ *   - `media.ts` `renderSenseAudioImage` for the CLI agent path
+ * Both hand the URL straight to `fetch(...)` next, so pair this
+ * guard with `redirect: 'error'` on the fetch to also block a
+ * 3xx hop into private space.
+ */
+export async function assertExternalAssetUrl(
+  rawUrl: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (typeof rawUrl !== 'string' || !rawUrl) {
+    return { ok: false, error: 'empty download url' };
+  }
+  const validated = await validateBaseUrlResolved(rawUrl);
+  if (validated.error || !validated.parsed) {
+    return {
+      ok: false,
+      error: validated.forbidden
+        ? `blocked download url (${validated.error ?? 'internal address'})`
+        : `invalid download url: ${validated.error ?? 'unknown reason'}`,
+    };
+  }
+  return { ok: true };
 }
 
 // Aggressive but not punitive — happy paths usually return in under 2 s.
@@ -315,10 +357,10 @@ function inspectProviderCompletion(
   const obj = data && typeof data === 'object' ? data as Record<string, unknown> : null;
   if (!obj) return { valid: false };
 
-  if (protocol === 'openai' || protocol === 'azure') {
+  if (protocol === 'openai' || protocol === 'azure' || protocol === 'senseaudio') {
     const responseModel = typeof obj.model === 'string' ? obj.model : '';
     if (
-      protocol === 'openai' &&
+      (protocol === 'openai' || protocol === 'senseaudio') &&
       enforceResponseModel &&
       responseModel &&
       requestedModel &&
@@ -480,6 +522,7 @@ interface ProviderCallShape {
   headers: Record<string, string>;
   body: unknown;
   extractText: (data: unknown) => string;
+  retryBodyOnUnsupportedMaxTokens?: unknown;
 }
 
 function buildProviderCall(input: ProviderTestRequest): ProviderCallShape {
@@ -518,6 +561,12 @@ function buildProviderCall(input: ProviderTestRequest): ProviderCallShape {
         },
       };
     case 'openai':
+    case 'senseaudio':
+      // SenseAudio is wire-compatible with OpenAI (POST /v1/chat/completions,
+      // Bearer auth, identical body + response shape), so the connection
+      // smoke test reuses the same call shape. We default the base URL
+      // upstream-side in chat-routes; this layer assumes the caller passed
+      // a concrete URL via the BYOK form.
       return {
         url: appendVersionedApiPath(baseUrl, '/chat/completions'),
         headers: {
@@ -526,7 +575,7 @@ function buildProviderCall(input: ProviderTestRequest): ProviderCallShape {
         },
         body: {
           model,
-          max_tokens: PROVIDER_MAX_TOKENS,
+          ...buildOpenAIChatTokenParam(model, PROVIDER_MAX_TOKENS),
           messages: [{ role: 'user', content: SMOKE_PROMPT }],
           stream: false,
         },
@@ -559,17 +608,22 @@ function buildProviderCall(input: ProviderTestRequest): ProviderCallShape {
         },
         body: {
           ...(usesVersionedOpenAIPath ? { model } : {}),
-          max_tokens: PROVIDER_MAX_TOKENS,
+          ...buildLegacyMaxTokensParam(PROVIDER_MAX_TOKENS),
           messages: [{ role: 'user', content: SMOKE_PROMPT }],
           stream: false,
+        },
+        retryBodyOnUnsupportedMaxTokens: {
+          ...(usesVersionedOpenAIPath ? { model } : {}),
+          messages: [{ role: 'user', content: SMOKE_PROMPT }],
+          stream: false,
+          ...buildMaxCompletionTokensParam(PROVIDER_MAX_TOKENS),
         },
         extractText: extractOpenAIMessageText,
       };
     }
     case 'google': {
-      const trimmedBase = baseUrl.replace(/\/+$/, '');
       return {
-        url: `${trimmedBase}/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+        url: googleGenerateContentUrl(baseUrl, model),
         headers: {
           'content-type': 'application/json',
           'x-goog-api-key': apiKey,
@@ -685,14 +739,59 @@ export async function testProviderConnection(
     );
     if (modelError) return modelError;
 
-    const response = await fetch(call.url, {
+    const requestInit = {
       method: 'POST',
       headers: call.headers,
-      body: JSON.stringify(call.body),
       signal: controller.signal,
-      redirect: 'error',
+      redirect: 'error' as const,
+    };
+    let response = await fetch(call.url, {
+      ...requestInit,
+      body: JSON.stringify(call.body),
     });
-    const latencyMs = Date.now() - start;
+    let latencyMs = Date.now() - start;
+    if (
+      !response.ok &&
+      call.retryBodyOnUnsupportedMaxTokens !== undefined
+    ) {
+      let detailText = '';
+      try {
+        detailText = await response.text();
+      } catch {
+        detailText = '';
+      }
+      if (response.status === 400 && isUnsupportedMaxTokensError(detailText)) {
+        console.warn(
+          `[test:provider] ${input.protocol} ${validated.parsed.hostname} model=${input.model} → retrying with max_completion_tokens`,
+        );
+        response = await fetch(call.url, {
+          ...requestInit,
+          body: JSON.stringify(call.retryBodyOnUnsupportedMaxTokens),
+        });
+        latencyMs = Date.now() - start;
+      } else {
+        const redactedDetail = redactSecrets(detailText.slice(0, 240), [
+          input.apiKey,
+        ]);
+        const kind = statusToKind(response.status, redactedDetail);
+        const detail =
+          redactedDetail ||
+          (response.status === 404
+            ? 'HTTP 404 from provider; check the Base URL path.'
+            : '');
+        console.warn(
+          `[test:provider] ${input.protocol} ${validated.parsed.hostname} model=${input.model} → ${response.status} in ${latencyMs}ms (${kind})${detail ? ` ${detail}` : ''}`,
+        );
+        return {
+          ok: false,
+          kind,
+          latencyMs,
+          model,
+          status: response.status,
+          detail,
+        };
+      }
+    }
     if (response.ok) {
       let data: unknown;
       let rawText = '';

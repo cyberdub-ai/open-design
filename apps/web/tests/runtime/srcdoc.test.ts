@@ -37,6 +37,23 @@ describe('buildSrcdoc', () => {
     expect(srcdoc).toContain('foreignObject');
   });
 
+  it('can guard preview iframes against load-time focus stealing', () => {
+    // This test would fail if injectPreviewFocusGuard were removed from
+    // buildSrcdoc — the guard script would be absent, and the assertions
+    // below would not find the data-od-preview-focus-guard marker.
+    const srcdoc = buildSrcdoc(
+      '<!doctype html><html><head><script>window.focus();document.body.focus();</script></head><body>Hero</body></html>',
+      { previewFocusGuard: true },
+    );
+
+    expect(srcdoc).toContain('data-od-preview-focus-guard');
+    expect(srcdoc).toContain("Object.defineProperty(window, 'focus'");
+    expect(srcdoc).toContain("Object.defineProperty(HTMLElement.prototype, 'focus'");
+    expect(srcdoc.indexOf('data-od-preview-focus-guard')).toBeLessThan(
+      srcdoc.indexOf('<script>window.focus();document.body.focus();</script>'),
+    );
+  });
+
   it('only uses directly mutable slide conventions for setActive support', () => {
     const srcdoc = buildSrcdoc(
       '<section class="slide">One</section><section class="slide">Two</section>',
@@ -76,6 +93,9 @@ describe('buildSrcdoc', () => {
     expect(srcdoc).toContain("type: 'od:preview-scroll'");
     expect(srcdoc).toContain("type: 'od:preview-scroll-request'");
     expect(srcdoc).toContain('data-od-selection-bridge-style');
+    expect(srcdoc).toContain('html[data-od-comment-mode] body iframe');
+    expect(srcdoc).toContain('html[data-od-inspect-mode] body iframe');
+    expect(srcdoc).toContain('pointer-events: none !important');
   });
 
   it('emits free-pin fallback coordinates in viewport space', () => {
@@ -230,6 +250,7 @@ describe('buildSrcdoc', () => {
     expect(srcdoc).not.toContain('data-od-selection-bridge');
     expect(srcdoc).not.toContain("type: 'od:comment-target'");
     expect(srcdoc).not.toContain("type: 'od:inspect-overrides'");
+    expect(srcdoc).not.toContain('html[data-od-comment-mode] body iframe');
   });
 
   // Regression for nexu-io/open-design#892: imported designs (e.g. Claude
