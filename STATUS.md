@@ -4,7 +4,7 @@ Self-hosted Claude Design alternative на 44 машине.
 URL: https://open-design.cyberdub.su
 Daemon: port 7457, systemd user service `open-design.service`
 
-## Текущий статус: ✅ LIVE + Image Gen через Pollinations
+## Текущий статус: ✅ LIVE + Image Gen через Pollinations (upstream sync 2026-05-25)
 
 ## Что сделано
 
@@ -24,6 +24,7 @@ Daemon: port 7457, systemd user service `open-design.service`
 - **Git**: Fork → https://github.com/cyberdub-ai/open-design
   - origin = git@github.com:cyberdub-ai/open-design.git (наш форк)
   - upstream = https://github.com/nexu-io/open-design (автор)
+- **Upstream sync 2026-05-25**: смержены design system review panel #2848, rename editable DS #2812, Trae CLI ACP #2856. Конфликты — взяли --ours (write tools MCP сохранены). Добавили validateProjectDesignSystemId в server.ts + validation deps в registerProjectRoutes/registerImportRoutes (upstream-ломающий рефакторинг).
 
 ## Update workflow (получить обновления автора)
 
