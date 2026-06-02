@@ -1566,9 +1566,82 @@ async function sendJson(method: string, url: string, body?: unknown): Promise<an
   return await resp.json();
 }
 
-const postJson = (url: string, body?: unknown) => sendJson('POST', url, body);
+async function postJson<T = unknown>(url: string, body?: unknown): Promise<T> {
+  return sendJson('POST', url, body) as Promise<T>;
+}
+
 const patchJson = (url: string, body?: unknown) => sendJson('PATCH', url, body);
 const deleteJson = (url: string) => sendJson('DELETE', url, undefined);
+
+// Плагины: flatten raw daemon record
+async function listPlugins(baseUrl: string): Promise<JsonObject> {
+  const raw = await getJson<{ plugins?: JsonObject[] }>(`${baseUrl}/api/plugins`);
+  const plugins = (raw?.plugins ?? []).map((p) => {
+    const manifest = (p?.manifest as JsonObject | undefined) ?? {};
+    const od = (manifest.od as JsonObject | undefined) ?? {};
+    const result: JsonObject = { id: p?.id, title: manifest.title ?? p?.title ?? p?.id };
+    if (typeof manifest.description === 'string') result.description = manifest.description;
+    const kind = od.taskKind ?? od.kind;
+    if (typeof kind === 'string') result.kind = kind;
+    if (Array.isArray(manifest.tags)) result.tags = manifest.tags;
+    return result;
+  });
+  return { plugins };
+}
+
+// Агенты: только установленные (unless includeUnavailable)
+async function listAgents(baseUrl: string, includeUnavailable: boolean): Promise<JsonObject> {
+  const raw = await getJson<{ agents?: JsonObject[] }>(`${baseUrl}/api/agents`);
+  const all = raw?.agents ?? [];
+  const filtered = includeUnavailable ? all : all.filter((a) => a?.available === true);
+  const MAX_MODELS = 10;
+  const agents = filtered.map((a) => {
+    const models = Array.isArray(a?.models) ? (a.models as unknown[]) : [];
+    const out: JsonObject = { id: a?.id, name: a?.name, models: models.slice(0, MAX_MODELS), modelsCount: models.length };
+    if (typeof a?.version === 'string' && a.version.length > 0) out.version = a.version;
+    if (includeUnavailable) {
+      out.available = Boolean(a?.available);
+      if (typeof a?.installUrl === 'string') out.installUrl = a.installUrl;
+    }
+    return out;
+  });
+  return { agents };
+}
+
+// Создать артефакт (для create_artifact)
+async function createArtifact(baseUrl: string, args: McpArgs) {
+  const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
+  requireString(args.name, 'name');
+  requireString(args.content, 'content');
+  const body: Record<string, unknown> = {
+    name: args.name,
+    content: args.content,
+    encoding: args.encoding === 'base64' ? 'base64' : 'utf8',
+    artifact: true,
+    overwrite: false,
+  };
+  if (args.artifactManifest !== undefined && args.artifactManifest !== null) {
+    body.artifactManifest = args.artifactManifest;
+  }
+  const data = await postJson<JsonObject>(`${baseUrl}/api/projects/${encodeURIComponent(id)}/files`, body);
+  return ok(withActiveEcho(data, active, resolved));
+}
+
+// Запустить генерацию
+async function startRun(baseUrl: string, args: McpArgs) {
+  const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
+  const body: Record<string, unknown> = { projectId: id };
+  if (typeof args.prompt === 'string' && args.prompt.length > 0) body.message = args.prompt;
+  if (typeof args.skill === 'string' && args.skill.length > 0) body.skillId = args.skill;
+  if (typeof args.plugin === 'string' && args.plugin.length > 0) body.pluginId = args.plugin;
+  if (typeof args.agent === 'string' && args.agent.length > 0) body.agentId = args.agent;
+  if (typeof args.model === 'string' && args.model.length > 0) body.model = args.model;
+  if (args.inputs !== undefined && args.inputs !== null && typeof args.inputs === 'object' && !Array.isArray(args.inputs)) {
+    body.pluginInputs = args.inputs;
+  }
+  const created = await postJson<JsonObject>(`${baseUrl}/api/runs`, body);
+  return ok(withActiveEcho({ ...created as JsonObject, hint: 'Run started. Poll get_run(runId) every 30-60s.' }, active, resolved));
+}
 
 // Server-side validator is /^[A-Za-z0-9._-]{1,128}$/. We slug names by
 // lowercasing, replacing whitespace with `-`, dropping anything outside
@@ -1601,7 +1674,7 @@ async function pickProjectId(baseUrl: string, explicitId: unknown, name: string)
   // cache entirely for the collision check.
   let list;
   try {
-    const data = await getJson(`${baseUrl}/api/projects`) as any;
+    const data = await getJson<ProjectsPayload>(`${baseUrl}/api/projects`);
     list = Array.isArray(data?.projects) ? data.projects : [];
   } catch {
     return slug;
