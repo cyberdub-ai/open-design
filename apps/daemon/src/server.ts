@@ -11029,14 +11029,14 @@ export async function startServer({
           },
         });
         try {
-          child.stdin.write(`${userMessage}\n`, 'utf8');
+          child.stdin.end(`${userMessage}\n`, 'utf8');
         } catch (err) {
           // Swallow EPIPE here for the same reason as the listener above —
           // a fast-exiting child has already routed its failure through
           // stderr / exit handlers.
           if (err && err.code !== 'EPIPE') throw err;
         }
-        run.stdinOpen = true;
+        run.stdinOpen = false;
       } else {
         child.stdin.end(composed, 'utf8');
       }
