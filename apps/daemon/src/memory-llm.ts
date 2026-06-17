@@ -139,7 +139,7 @@ const PROVIDER_DEFAULTS = {
   // pick anything off the picker's `Custom...` list.
   ollama: {
     model: 'gemma3:4b',
-    baseUrl: 'https://ollama.com',
+    baseUrl: process.env.OLLAMA_HOST || 'http://localhost:11434',
   },
   // SenseAudio's chat API is OpenAI-compatible (POST /v1/chat/completions,
   // Bearer auth), so the extractor falls through to callOpenAI with this
