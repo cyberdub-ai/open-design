@@ -153,4 +153,5 @@ export const codexAgentDef = {
     promptViaStdin: true,
     streamFormat: 'json-event-stream',
     eventParser: 'codex',
+    inactivityTimeoutMs: 30 * 60 * 1000,
 } satisfies RuntimeAgentDef;
