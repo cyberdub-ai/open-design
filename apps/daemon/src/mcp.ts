@@ -1011,18 +1011,6 @@ async function formatDaemonError(resp: Response, url: string): Promise<string> {
   return `daemon ${resp.status} on ${url}: ${detail}`;
 }
 
-async function postJson<T>(url: string, body: unknown): Promise<T> {
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
-  });
-  if (!resp.ok) {
-    throw new Error(await formatDaemonError(resp, url));
-  }
-  return (await resp.json()) as T;
-}
-
 // Create an empty project to generate into. start_run needs an existing
 // project; without this an external agent could only work on projects
 // the user had already created in Open Design.
@@ -1065,63 +1053,6 @@ async function updateProject(baseUrl: string, args: McpArgs) {
   return ok(withActiveEcho(data, null, resolved));
 }
 
-// Flatten daemon's plugin record into the few fields an external agent
-// needs to pick a plugin: id, title, description, kind, tags. The raw
-// record carries 16+ fields (fsPath, sourceMarketplaceId, installedAt,
-// resolvedSource, …) that an agent never reasons about, and the
-// human-readable description / kind live one level deeper in
-// `manifest.description` / `manifest.od.kind`.
-async function listPlugins(baseUrl: string): Promise<JsonObject> {
-  const raw = await getJson<{ plugins?: JsonObject[] }>(`${baseUrl}/api/plugins`);
-  const plugins = (raw?.plugins ?? []).map((p) => {
-    const manifest = (p?.manifest as JsonObject | undefined) ?? {};
-    const od = (manifest.od as JsonObject | undefined) ?? {};
-    const result: JsonObject = {
-      id: p?.id,
-      title: manifest.title ?? p?.title ?? p?.id,
-    };
-    if (typeof manifest.description === 'string') result.description = manifest.description;
-    const kind = od.taskKind ?? od.kind;
-    if (typeof kind === 'string') result.kind = kind;
-    if (Array.isArray(manifest.tags)) result.tags = manifest.tags;
-    return result;
-  });
-  return { plugins };
-}
-
-// Flatten daemon's agent definition into the few fields an external
-// agent needs to pick a value for start_run.agent. Default filters to
-// `available: true` (only installed CLIs) so the outer agent doesn't
-// pick an agent it can't actually run — the failure mode that left us
-// with zombie "running" runs whose inner Claude binary never spawned.
-// Models are truncated to 10 with `modelsCount` carrying the full
-// total; that keeps the response token-economical even for agents
-// (e.g. opencode) that expose 100+ models.
-async function listAgents(baseUrl: string, includeUnavailable: boolean): Promise<JsonObject> {
-  const raw = await getJson<{ agents?: JsonObject[] }>(`${baseUrl}/api/agents`);
-  const all = raw?.agents ?? [];
-  const filtered = includeUnavailable
-    ? all
-    : all.filter((a) => a?.available === true);
-  const MAX_MODELS = 10;
-  const agents = filtered.map((a) => {
-    const models = Array.isArray(a?.models) ? (a.models as unknown[]) : [];
-    const out: JsonObject = {
-      id: a?.id,
-      name: a?.name,
-      models: models.slice(0, MAX_MODELS),
-      modelsCount: models.length,
-    };
-    if (typeof a?.version === 'string' && a.version.length > 0) out.version = a.version;
-    if (includeUnavailable) {
-      out.available = Boolean(a?.available);
-      if (typeof a?.installUrl === 'string') out.installUrl = a.installUrl;
-    }
-    return out;
-  });
-  return { agents };
-}
-
 // Derive a valid project id ([A-Za-z0-9._-], <=128) from a display name,
 // with a short random suffix so repeated creates with the same name
 // don't collide on the daemon's primary key.
@@ -1132,44 +1063,6 @@ function slugifyProjectId(name: string): string {
   return `${base}-${randomUUID().replace(/-/g, '').slice(0, 4)}`;
 }
 
-// Commission a generation run. The caller never runs the skill/plugin
-// itself; we POST to /api/runs and the daemon spawns its own agent.
-// Returns the runId immediately so the caller can poll get_run —
-// start+poll because MCP is request/response and generation is
-// minutes-long.
-async function startRun(baseUrl: string, args: McpArgs) {
-  const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
-  const body: JsonObject = { projectId: id };
-  if (typeof args.prompt === 'string' && args.prompt.length > 0) body.message = args.prompt;
-  if (typeof args.skill === 'string' && args.skill.length > 0) body.skillId = args.skill;
-  if (typeof args.plugin === 'string' && args.plugin.length > 0) body.pluginId = args.plugin;
-  if (typeof args.agent === 'string' && args.agent.length > 0) body.agentId = args.agent;
-  if (typeof args.model === 'string' && args.model.length > 0) body.model = args.model;
-  if (args.inputs !== undefined) {
-    if (args.inputs === null || typeof args.inputs !== 'object' || Array.isArray(args.inputs)) {
-      throw new Error('inputs must be an object');
-    }
-    body.pluginInputs = args.inputs;
-  }
-  const created = await postJson<JsonObject>(`${baseUrl}/api/runs`, body);
-  // Build studioUrl (conversation-level — no entry file yet) so the
-  // outer agent has a URL to give the user right away. The daemon
-  // returns conversationId in the response now that POST /api/runs
-  // falls back to the project's default conversation for MCP callers.
-  const webBase = await getWebBaseUrl(baseUrl);
-  const studioUrl = buildStudioUrl(webBase, id, created?.conversationId, null);
-  return ok(
-    withActiveEcho(
-      {
-        ...created,
-        ...(studioUrl ? { studioUrl } : {}),
-        hint: 'Run started. Open Design generation normally takes 5–30 minutes. Polls showing status:running with no new files / unchanged file mtimes is the inner agent thinking, NOT a hang — DO NOT cancel_run out of impatience and DO NOT substitute write_file to produce the design yourself; OD\'s pipeline is what gives the result its design quality. Poll get_run(runId) every 30–60 seconds; report "still working" to the user between polls and keep waiting. On terminal status the response carries previewUrl + agentMessage which together are the canonical deliverable. When studioUrl is present, ALWAYS show it to the user as a clickable markdown link: `[Open Open Design studio](STUDIO_URL)` — never as inline code or bare text, because Codex / Cursor / Zed render markdown links as navigable in their built-in browser pane and inline code blocks are not clickable.',
-      },
-      active,
-      resolved,
-    ),
-  );
-}
 
 // Poll a run. On terminal status we enrich the daemon's status body
 // with three things the outer agent needs to actually close the loop:
@@ -1398,38 +1291,6 @@ async function buildRunPreviewUrl(baseUrl: string, projectId: string): Promise<s
   } catch {
     return null;
   }
-}
-
-async function createArtifact(baseUrl: string, args: McpArgs) {
-  const { id, resolved, active } = await resolveProjectArg(baseUrl, args.project);
-  requireString(args.name, 'name');
-  requireString(args.content, 'content');
-  if (
-    args.artifactManifest !== undefined &&
-    (args.artifactManifest === null ||
-      typeof args.artifactManifest !== 'object' ||
-      Array.isArray(args.artifactManifest))
-  ) {
-    throw new Error('artifactManifest must be an object');
-  }
-  const artifactManifest =
-    args.artifactManifest
-      ? args.artifactManifest
-      : undefined;
-  const payload = await postCreateArtifactRequest({
-    baseUrl,
-    projectId: id,
-    input: {
-      name: args.name,
-      content: args.content,
-      encoding: args.encoding === 'base64' ? 'base64' : 'utf8',
-      ...(artifactManifest === undefined ? {} : { artifactManifest }),
-    },
-  });
-  const result = payload && typeof payload === 'object' && !Array.isArray(payload)
-    ? (payload as JsonObject)
-    : { result: payload };
-  return ok(withActiveEcho(result, active, resolved));
 }
 
 // Resource description renderers in some MCP UIs collapse whitespace
