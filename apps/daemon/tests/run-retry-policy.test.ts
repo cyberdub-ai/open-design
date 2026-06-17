@@ -1,9 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS,
   SAFE_RUN_RETRY_STRATEGY,
   decideSafeRunRetry,
+  resolveDefaultSafeRunRetryMaxAttempts,
   type RunRetryPolicyInput,
 } from '../src/run-retry-policy.js';
 
@@ -205,5 +206,71 @@ describe('decideSafeRunRetry', () => {
         }).shouldRetry,
       ).toBe(false);
     }
+  });
+});
+
+describe('resolveDefaultSafeRunRetryMaxAttempts', () => {
+  it('falls back to the built-in default when the override is unset, empty, or malformed', () => {
+    expect(resolveDefaultSafeRunRetryMaxAttempts({})).toBe(
+      DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS,
+    );
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: '' }),
+    ).toBe(DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS);
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: '   ' }),
+    ).toBe(DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS);
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: 'abc' }),
+    ).toBe(DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS);
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: '-1' }),
+    ).toBe(DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS);
+  });
+
+  it('parses and floors a valid positive override', () => {
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: '2' }),
+    ).toBe(2);
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: ' 3 ' }),
+    ).toBe(3);
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: '2.9' }),
+    ).toBe(2);
+    expect(
+      resolveDefaultSafeRunRetryMaxAttempts({ OD_SAFE_RUN_RETRY_MAX_ATTEMPTS: '0' }),
+    ).toBe(0);
+  });
+});
+
+describe('decideSafeRunRetry env-driven default ceiling', () => {
+  afterEach(() => {
+    delete process.env.OD_SAFE_RUN_RETRY_MAX_ATTEMPTS;
+  });
+
+  it('honors OD_SAFE_RUN_RETRY_MAX_ATTEMPTS when maxAttempts is not passed', () => {
+    process.env.OD_SAFE_RUN_RETRY_MAX_ATTEMPTS = '2';
+    // attemptCount=1 would hit the built-in single-attempt cap; the override
+    // lifts the ceiling so a second transient respawn is still allowed.
+    expect(decide({ attemptCount: 1 })).toMatchObject({
+      shouldRetry: true,
+      retryAttemptIndex: 2,
+      retryMaxAttempts: 2,
+    });
+    expect(decide({ attemptCount: 2 })).toMatchObject({
+      shouldRetry: false,
+      retryAttemptIndex: 3,
+      retryMaxAttempts: 2,
+      retrySuppressedReason: 'attempt_limit_reached',
+    });
+  });
+
+  it('keeps the single-attempt default when the override is absent', () => {
+    expect(decide({ attemptCount: 1 })).toMatchObject({
+      shouldRetry: false,
+      retryMaxAttempts: DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS,
+      retrySuppressedReason: 'attempt_limit_reached',
+    });
   });
 });

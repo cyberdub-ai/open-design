@@ -14,6 +14,28 @@ import type {
 export const DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS = 1;
 export const SAFE_RUN_RETRY_STRATEGY: TrackingRunRetryStrategy = 'same_run_transient';
 
+// Operator override for the built-in single-attempt cap (issue #3543). A
+// deployment sitting behind a flappy egress proxy can lose the egress for
+// longer than one fresh-respawn cycle, so a single automatic retry still ends
+// in a failed run. `OD_SAFE_RUN_RETRY_MAX_ATTEMPTS` raises the ceiling so a
+// multi-cycle transient drop gets more respawns before the run is declared
+// failed. This only widens the count: eligibility stays restricted to
+// transient categories (see isTransientRetryCategory) and every side-effect
+// gate still applies, so a higher ceiling never re-runs a turn that already
+// produced visible output or touched an artifact. An unset, empty, malformed,
+// or negative value falls back to the built-in default.
+export function resolveDefaultSafeRunRetryMaxAttempts(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.OD_SAFE_RUN_RETRY_MAX_ATTEMPTS?.trim();
+  if (!raw) return DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS;
+  }
+  return Math.floor(parsed);
+}
+
 export interface RunRetryFailureSignal {
   failure_category?: TrackingRunFailureCategory;
   failure_detail?: TrackingRunFailureDetail;
@@ -59,7 +81,7 @@ function normalizeAttemptCount(attemptCount: number): number {
 }
 
 function normalizeMaxAttempts(maxAttempts: number | undefined): number {
-  if (maxAttempts === undefined) return DEFAULT_SAFE_RUN_RETRY_MAX_ATTEMPTS;
+  if (maxAttempts === undefined) return resolveDefaultSafeRunRetryMaxAttempts();
   if (!Number.isFinite(maxAttempts) || maxAttempts < 0) return 0;
   return Math.floor(maxAttempts);
 }
