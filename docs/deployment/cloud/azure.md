@@ -1,6 +1,6 @@
 # Azure Container Instances
 
-This guide deploys the Docker image to Azure Container Instances (ACI) with persistent Open Design data. Before choosing or documenting any daemon data mount, read root `AGENTS.md` → **Daemon data directory contract**. That section is mandatory and must not be restated here.
+This guide deploys the Docker image to Azure Container Instances (ACI) with persistent OpenDesign data. Before choosing or documenting any daemon data mount, read root `AGENTS.md` → **Daemon data directory contract**. That section is mandatory and must not be restated here.
 
 ACI is the daemon upstream in this topology. The browser-facing app URL must be served by an authenticated TLS reverse proxy that forwards traffic to ACI, injects the daemon bearer token on `/api/*` requests, and sends a browser origin listed in `OD_ALLOWED_ORIGINS`.
 
@@ -120,7 +120,7 @@ az deployment group create \
     odApiToken="$OD_API_TOKEN" \
     dnsNameLabel="$DNS_LABEL" \
     allowedOrigins="$BROWSER_ORIGIN" \
-    image="docker.io/vanjayak/open-design:latest" \
+    image="ghcr.io/nexu-io/od:latest" \
     cpuCores=1 \
     memoryInGB=1 \
     fileShareQuotaGB=10

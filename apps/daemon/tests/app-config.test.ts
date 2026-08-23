@@ -13,7 +13,7 @@ import {
   it,
 } from 'vitest';
 
-import { readAppConfig, writeAppConfig } from '../src/app-config.js';
+import { agentCliEnvForAgent, readAppConfig, writeAppConfig } from '../src/app-config.js';
 import { isLocalSameOrigin } from '../src/origin-validation.js';
 
 // Default telemetry preference applied when an existing config has no
@@ -118,6 +118,17 @@ describe('app-config', () => {
       });
     });
 
+    it('preserves and validates the silent update preference', async () => {
+      await writeFile(
+        path.join(dataDir, 'app-config.json'),
+        JSON.stringify({ allowSilentUpdates: true }),
+      );
+
+      expect((await readAppConfig(dataDir)).allowSilentUpdates).toBe(true);
+      expect((await writeAppConfig(dataDir, { allowSilentUpdates: false })).allowSilentUpdates).toBe(false);
+      expect((await writeAppConfig(dataDir, { allowSilentUpdates: 'yes' })).allowSilentUpdates).toBeUndefined();
+    });
+
     it('preserves a partial explicit telemetry (metrics on, content off)', async () => {
       // The user picked a non-default combo (e.g. metrics on for funnel,
       // content off for privacy). We hand back exactly what they saved
@@ -148,6 +159,90 @@ describe('app-config', () => {
         time: '09:30',
       });
       expect(cfg.orbit).not.toHaveProperty('templateSkillId');
+    });
+
+    it('preserves only the minimal persisted Orbit Workspace identity', async () => {
+      await writeFile(
+        path.join(dataDir, 'app-config.json'),
+        JSON.stringify({
+          orbit: {
+            enabled: true,
+            time: '09:30',
+            workspaceScope: {
+              workspaceId: ' workspace-a ',
+              workspaceMemberId: ' member-a ',
+              role: 'owner',
+            },
+          },
+        }),
+      );
+
+      const cfg = await readAppConfig(dataDir);
+
+      expect(cfg.orbit?.workspaceScope).toEqual({
+        workspaceId: 'workspace-a',
+        workspaceMemberId: 'member-a',
+      });
+    });
+
+    it('keeps scoped Orbit identity when an older client updates Orbit without that field', async () => {
+      await writeAppConfig(dataDir, {
+        orbit: {
+          enabled: true,
+          time: '09:30',
+          workspaceScope: {
+            workspaceId: 'workspace-a',
+            workspaceMemberId: 'member-a',
+          },
+        },
+      });
+
+      await writeAppConfig(dataDir, {
+        orbit: {
+          enabled: false,
+          time: '10:15',
+        },
+      });
+
+      await expect(readAppConfig(dataDir)).resolves.toMatchObject({
+        orbit: {
+          enabled: false,
+          time: '10:15',
+          workspaceScope: {
+            workspaceId: 'workspace-a',
+            workspaceMemberId: 'member-a',
+          },
+        },
+      });
+    });
+
+    it('allows an explicit null to clear a persisted Orbit Workspace identity', async () => {
+      await writeAppConfig(dataDir, {
+        orbit: {
+          enabled: true,
+          time: '09:30',
+          workspaceScope: {
+            workspaceId: 'workspace-a',
+            workspaceMemberId: 'member-a',
+          },
+        },
+      });
+
+      await writeAppConfig(dataDir, {
+        orbit: {
+          enabled: false,
+          time: '10:15',
+          workspaceScope: null,
+        },
+      });
+
+      await expect(readAppConfig(dataDir)).resolves.toMatchObject({
+        orbit: {
+          enabled: false,
+          time: '10:15',
+          workspaceScope: null,
+        },
+      });
     });
 
     it('falls back to default orbit time for out-of-range stored values', async () => {
@@ -282,7 +377,7 @@ describe('app-config', () => {
     it('validates agentModels entries, dropping invalid shapes', async () => {
       await writeAppConfig(dataDir, {
         agentModels: {
-          validAgent: { model: 'gpt-4', reasoning: 'fast' },
+          validAgent: { model: 'gpt-4', reasoning: 'fast', serviceTier: 'priority' },
           invalidAgent: 'not-an-object',
           arrayAgent: [1, 2, 3],
           badKeys: { model: 'ok', extra: 42 },
@@ -290,7 +385,7 @@ describe('app-config', () => {
       });
       const cfg = await readAppConfig(dataDir);
       expect(cfg.agentModels).toEqual({
-        validAgent: { model: 'gpt-4', reasoning: 'fast' },
+        validAgent: { model: 'gpt-4', reasoning: 'fast', serviceTier: 'priority' },
       });
     });
 
@@ -302,6 +397,27 @@ describe('app-config', () => {
       const cfg = await readAppConfig(dataDir);
       expect(cfg.onboardingCompleted).toBe(true);
       expect(cfg.agentModels).toBeUndefined();
+    });
+
+    it('clears retired Gemini agent preferences from stored config', async () => {
+      await writeFile(path.join(dataDir, 'app-config.json'), JSON.stringify({
+        agentId: 'gemini',
+        agentModels: {
+          gemini: { model: 'gemini-2.5-pro' },
+          codex: { model: 'gpt-5-codex' },
+        },
+        agentCliEnv: {
+          gemini: { GEMINI_BIN: '~/bin/gemini' },
+        },
+      }));
+
+      const cfg = await readAppConfig(dataDir);
+
+      expect(cfg.agentId).toBeUndefined();
+      expect(cfg.agentModels).toEqual({
+        codex: { model: 'gpt-5-codex' },
+      });
+      expect(cfg.agentCliEnv).toBeUndefined();
     });
 
     it('persists supported per-agent CLI env keys and drops everything else', async () => {
@@ -327,11 +443,14 @@ describe('app-config', () => {
             OPENCODE_TEST_HOME: '  ~/.open-design-amr-opencode  ',
             HOME: 'should-not-persist',
           },
+          opencode: {
+            OPENCODE_BIN: '  ~/bin/opencode  ',
+          },
+          'byok-opencode': {
+            OPENCODE_BIN: '  ~/bin/byok-opencode  ',
+          },
           'trae-cli': {
             TRAE_CLI_BIN: '  ~/bin/traecli-public  ',
-          },
-          gemini: {
-            GEMINI_API_KEY: 'should-not-persist',
           },
           __proto__: {
             CLAUDE_CONFIG_DIR: 'bad',
@@ -350,7 +469,11 @@ describe('app-config', () => {
           OPEN_DESIGN_AMR_PROFILE: 'local',
           OPENCODE_TEST_HOME: '~/.open-design-amr-opencode',
         },
+        opencode: { OPENCODE_BIN: '~/bin/opencode' },
         'trae-cli': { TRAE_CLI_BIN: '~/bin/traecli-public' },
+      });
+      expect(agentCliEnvForAgent(cfg.agentCliEnv, 'byok-opencode')).toEqual({
+        OPENCODE_BIN: '~/bin/opencode',
       });
     });
 

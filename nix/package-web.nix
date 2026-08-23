@@ -9,6 +9,7 @@
   fetchPnpmDeps,
   pnpmConfigHook,
   src,
+  pnpmDepsSrc ? src,
   workspacePaths,
 }:
 # Builds the @open-design/web Next.js static export.
@@ -43,7 +44,8 @@ in
     ];
 
     pnpmDeps = fetchPnpmDeps {
-      inherit (finalAttrs) pname version src;
+      inherit (finalAttrs) pname version;
+      src = pnpmDepsSrc;
       hash = pnpmDepsHash;
       # Force the deps-fetch derivation to use the flake's pinned
       # pnpm_10 as well. fetchPnpmDeps defaults to `pkgs.pnpm` when
@@ -83,7 +85,7 @@ in
     };
 
     meta = with lib; {
-      description = "Open Design — Next.js static SPA (apps/web)";
+      description = "OpenDesign — Next.js static SPA (apps/web)";
       homepage = "https://github.com/nexu-io/open-design";
       license = licenses.asl20;
       platforms = platforms.linux ++ platforms.darwin;

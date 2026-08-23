@@ -12,14 +12,20 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
-import { modelIdForTracking } from '@open-design/contracts/analytics';
+import {
+  modelIdForTracking,
+  type TrackingRunCancelOrigin,
+  type TrackingRunTerminalTrigger,
+} from '@open-design/contracts/analytics';
 
-import { readAppConfig } from './app-config.js';
+import { agentCliEnvForAgent, readAppConfig } from './app-config.js';
 import type { AppVersionInfo } from './app-version.js';
 import { listMessages } from './db.js';
+import { normalizeOpenDesignTelemetryRelayUrl } from './integrations/telemetry-relay.js';
 import {
   deriveLangfuseDeliveryState,
-  readTelemetrySinkConfig,
+  readFeedbackTelemetrySinkConfig,
+  readRunTelemetrySinkConfig,
   reportRunCompleted,
   reportRunFeedback,
   type AgentEventSummary,
@@ -35,8 +41,11 @@ import {
   type ReportContext,
   type RuntimeInfo,
   type TelemetrySinkConfig,
+  type TraceObjectSummary,
   type ToolCallSummary,
   type TurnInfo,
+  shouldFullyRedactToolPayload,
+  toolPayloadRedactionPlaceholder,
 } from './langfuse-trace.js';
 import type { PromptStackTelemetry } from './prompt-telemetry.js';
 import { redactSecrets } from './redact.js';
@@ -52,10 +61,14 @@ import {
   collectStdoutTailSummary,
   summarizeRunDiagnosticsForAnalytics,
 } from './run-diagnostics.js';
-import { classifyRunFailure } from './run-failure-classification.js';
+import {
+  classifyRunFailure,
+  type RunFailureClassification,
+} from './run-failure-classification.js';
 import { deriveRunErrorCode, runResultFromStatus } from './run-result.js';
 import { buildTraceObjectManifests } from './trace-object-manifest.js';
-import type { TraceArtifactObjectSource } from './trace-object-manifest.js';
+import type { TraceArtifactObjectSource, TraceObjectUploadManifests } from './trace-object-manifest.js';
+import { getDetectedRuntimeVersions } from './runtimes/detection.js';
 
 interface DaemonRunRecord {
   id: string;
@@ -68,6 +81,8 @@ interface DaemonRunRecord {
   signal?: string | null;
   error?: string | null;
   errorCode?: string | null;
+  cancelOrigin?: TrackingRunCancelOrigin | null;
+  terminalTrigger?: TrackingRunTerminalTrigger | null;
   analyticsTelemetry?: RunTelemetryTimestamps | null;
   createdAt: number;
   updatedAt: number;
@@ -82,13 +97,27 @@ interface DaemonRunRecord {
   // into chatBody / req across the createChatRunService boundary.
   userPrompt?: string;
   model?: string;
+  resolvedModelId?: string | null;
+  preflightAgentCliVersion?: string | null;
   reasoning?: string;
   skillId?: string;
   designSystemId?: string;
+  designSystemDigest?: string;
+  designSystemSelectionSource?: string;
+  promptCache?: {
+    stablePromptHash: string;
+    hit: boolean;
+    missReason: string | null;
+    changedSections?: string[] | null;
+  };
   clientType?: 'desktop' | 'web' | 'unknown';
   promptTelemetry?: PromptStackTelemetry;
   projectAttachmentPaths?: string[];
   projectMetadata?: Record<string, unknown> | null;
+  retryAttemptCount?: number;
+  retryFinalResult?: string;
+  retrySuppressedReason?: string;
+  retryOriginalFailure?: RunFailureClassification;
 }
 
 interface TraceSafeManifestResult {
@@ -179,14 +208,21 @@ function inferObjectRegistrationRelayUrl(env: NodeJS.ProcessEnv = process.env): 
   const objectRelayUrl = env.OPEN_DESIGN_OBJECT_RELAY_URL?.trim();
   if (!objectRelayUrl) {
     const telemetryRelayUrl = env.OPEN_DESIGN_TELEMETRY_RELAY_URL?.trim();
-    return telemetryRelayUrl ? telemetryRelayUrl.replace(/\/+$/, '') : null;
+    return telemetryRelayUrl
+      ? normalizeOpenDesignTelemetryRelayUrl(telemetryRelayUrl)
+      : null;
   }
+  const normalizedObjectRelayUrl = normalizeOpenDesignTelemetryRelayUrl(
+    objectRelayUrl,
+  );
   try {
-    const url = new URL(objectRelayUrl);
+    const url = new URL(normalizedObjectRelayUrl);
     url.pathname = url.pathname.replace(/\/api\/objects\/batch\/?$/, '/api/langfuse');
     return url.toString().replace(/\/+$/, '');
   } catch {
-    return objectRelayUrl.replace(/\/api\/objects\/batch\/?$/, '/api/langfuse').replace(/\/+$/, '');
+    return normalizedObjectRelayUrl
+      .replace(/\/api\/objects\/batch\/?$/, '/api/langfuse')
+      .replace(/\/+$/, '');
   }
 }
 
@@ -232,6 +268,8 @@ function turnInfoFromRun(
     turn.model = run.model;
   } else if (agentReportedModel && agentReportedModel.trim().length > 0) {
     turn.model = agentReportedModel.trim();
+  } else if (run.resolvedModelId && run.resolvedModelId.trim().length > 0) {
+    turn.model = run.resolvedModelId.trim();
   } else {
     // Keep Langfuse aligned with PostHog's model bucket when the user selected
     // "Default (CLI config)" and the runtime did not emit a resolved model.
@@ -240,6 +278,11 @@ function turnInfoFromRun(
   if (run.reasoning) turn.reasoning = run.reasoning;
   if (run.skillId) turn.skillId = run.skillId;
   if (run.designSystemId) turn.designSystemId = run.designSystemId;
+  if (run.designSystemDigest) turn.designSystemDigest = run.designSystemDigest;
+  if (run.designSystemSelectionSource) {
+    turn.designSystemSelectionSource = run.designSystemSelectionSource;
+  }
+  if (run.promptCache) turn.promptCache = run.promptCache;
   return Object.keys(turn).length > 0 ? turn : undefined;
 }
 
@@ -284,6 +327,7 @@ function messageUsageFromAnalytics(
     usage.input_tokens_effective !== undefined ||
     usage.output_tokens !== undefined ||
     usage.total_tokens !== undefined ||
+    usage.thought_tokens !== undefined ||
     usage.cache_read_input_tokens !== undefined ||
     usage.cache_creation_input_tokens !== undefined ||
     usage.uncached_input_tokens !== undefined ||
@@ -301,6 +345,7 @@ function messageUsageFromAnalytics(
   }
   if (usage.output_tokens !== undefined) out.outputTokens = usage.output_tokens;
   if (usage.total_tokens !== undefined) out.totalTokens = usage.total_tokens;
+  if (usage.thought_tokens !== undefined) out.thoughtTokens = usage.thought_tokens;
   if (usage.cache_read_input_tokens !== undefined) {
     out.cacheReadInputTokens = usage.cache_read_input_tokens;
   }
@@ -329,18 +374,19 @@ function eventTimestamp(
     : fallback;
 }
 
-const CONTENT_TOOL_NAMES = new Set([
-  'Read',
-  'Write',
-  'Edit',
-  'MultiEdit',
-  'NotebookEdit',
-]);
-
 function redactLocalPaths(value: string): string {
+  // macOS /Users, Linux /home + /root, Windows C:\Users — Linux is a primary
+  // supported environment, so Bash inputs like `cat /home/alice/.env` must not
+  // leak home directories into Langfuse tool spans.
   return value
-    .replace(/\/Users\/[^/\s"']+(?:\/[^ \n\r\t"'`<>)]*)?/g, '[REDACTED:local_path]')
-    .replace(/[A-Za-z]:\\Users\\[^\\\s"']+(?:\\[^ \n\r\t"'`<>)]*)?/g, '[REDACTED:local_path]');
+    .replace(
+      /\/(?:Users|home|root)\/[^/\s"']+(?:\/[^ \n\r\t"'`<>)]*)?/g,
+      '[REDACTED:local_path]',
+    )
+    .replace(
+      /[A-Za-z]:\\Users\\[^\\\s"']+(?:\\[^ \n\r\t"'`<>)]*)?/g,
+      '[REDACTED:local_path]',
+    );
 }
 
 function serializeToolPayload(
@@ -348,8 +394,11 @@ function serializeToolPayload(
   opts: { toolName: string; direction: 'input' | 'output' },
 ): string | undefined {
   if (value === undefined || value === null) return undefined;
-  if (CONTENT_TOOL_NAMES.has(opts.toolName)) {
-    return `[REDACTED:tool_${opts.direction}:content_tool:${opts.toolName}]`;
+  // Fail-closed: known content tools AND unknown/custom ACP tool names
+  // (kind:other MCP readers, etc.) fully redact. Only bash-like execute
+  // tools keep secret+path lexical masking.
+  if (shouldFullyRedactToolPayload(opts.toolName)) {
+    return toolPayloadRedactionPlaceholder(opts.toolName, opts.direction);
   }
   if (typeof value === 'string') return redactLocalPaths(redactSecrets(value));
   try {
@@ -380,19 +429,43 @@ function collectToolCalls(
       | null
       | undefined;
     if (data?.type === 'tool_use' && typeof data.id === 'string') {
-      const timestamp = eventTimestamp(rec, runStartedAt + rec.id);
-      const summary: ToolCallSummary = {
-        id: data.id,
-        name: typeof data.name === 'string' && data.name ? data.name : 'unknown',
-        startedAt: timestamp,
-        endedAt: timestamp,
-      };
-      const input = serializeToolPayload(data.input, {
-        toolName: summary.name,
-        direction: 'input',
-      });
-      if (input !== undefined) summary.input = input;
-      tools.set(data.id, summary);
+      const eventTs = eventTimestamp(rec, runStartedAt + rec.id);
+      // Prefer producer-supplied start time (ACP firstSeenAt) over event log ts.
+      const payloadStartedAt =
+        typeof (data as { startedAt?: unknown }).startedAt === 'number' &&
+        Number.isFinite((data as { startedAt: number }).startedAt)
+          ? (data as { startedAt: number }).startedAt
+          : undefined;
+      const timestamp = payloadStartedAt ?? eventTs;
+      const name = typeof data.name === 'string' && data.name ? data.name : 'unknown';
+      const existing = tools.get(data.id);
+      if (existing) {
+        // Second tool_use for the same id: refresh name/input, keep original startedAt.
+        existing.name = name;
+        const input = serializeToolPayload(data.input, {
+          toolName: name,
+          direction: 'input',
+        });
+        if (input !== undefined) existing.input = input;
+        else delete existing.input;
+        // If a later frame carries an earlier startedAt, prefer the earlier one.
+        if (payloadStartedAt !== undefined && payloadStartedAt < existing.startedAt) {
+          existing.startedAt = payloadStartedAt;
+        }
+      } else {
+        const summary: ToolCallSummary = {
+          id: data.id,
+          name,
+          startedAt: timestamp,
+          endedAt: eventTs,
+        };
+        const input = serializeToolPayload(data.input, {
+          toolName: name,
+          direction: 'input',
+        });
+        if (input !== undefined) summary.input = input;
+        tools.set(data.id, summary);
+      }
     } else if (
       data?.type === 'tool_result' &&
       typeof data.toolUseId === 'string'
@@ -436,6 +509,7 @@ function collectAgentEvents(
 ): AgentEventSummary[] {
   const out: AgentEventSummary[] = [];
   const statusCounts = new Map<string, number>();
+  const diagnosticCounts = new Map<string, number>();
   let thinkingCount = 0;
   let usageCount = 0;
   const source =
@@ -458,6 +532,19 @@ function collectAgentEvents(
           costUsd?: unknown;
           durationMs?: unknown;
           stopReason?: unknown;
+          name?: unknown;
+          source?: unknown;
+          reason?: unknown;
+          shape?: unknown;
+          elapsedMs?: unknown;
+          suppressedChars?: unknown;
+          suppressedChunks?: unknown;
+          openedBlocks?: unknown;
+          closedBlocks?: unknown;
+          fileCount?: unknown;
+          files?: unknown;
+          pendingCandidateChars?: unknown;
+          suppressing?: unknown;
         }
       | null
       | undefined;
@@ -472,6 +559,7 @@ function collectAgentEvents(
         typeof data.label === 'string' && data.label.length > 0
           ? data.label
           : 'working';
+      if (label === 'tool_call' || label === 'tool_call_update') continue;
       const index = statusCounts.get(label) ?? 0;
       statusCounts.set(label, index + 1);
       out.push({
@@ -515,6 +603,42 @@ function collectAgentEvents(
           ...(typeof data.stopReason === 'string'
             ? { stop_reason: data.stopReason }
             : {}),
+        },
+      });
+    } else if (type === 'diagnostic') {
+      if (!data) continue;
+      const diagnosticName =
+        typeof data.name === 'string' && data.name.length > 0
+          ? data.name
+          : 'runtime_diagnostic';
+      const index = diagnosticCounts.get(diagnosticName) ?? 0;
+      diagnosticCounts.set(diagnosticName, index + 1);
+      out.push({
+        id: `diagnostic-${diagnosticName}-${index}`,
+        name: `agent-diagnostic:${diagnosticName}`,
+        timestamp,
+        input: eventInput('diagnostic'),
+        output: {
+          name: diagnosticName,
+          ...(typeof data.source === 'string' ? { source: data.source } : {}),
+          ...(typeof data.reason === 'string' ? { reason: data.reason } : {}),
+          ...(typeof data.elapsedMs === 'number' ? { elapsed_ms: data.elapsedMs } : {}),
+          ...(typeof data.suppressedChars === 'number' ? { suppressed_chars: data.suppressedChars } : {}),
+          ...(typeof data.suppressedChunks === 'number' ? { suppressed_chunks: data.suppressedChunks } : {}),
+          ...(typeof data.openedBlocks === 'number' ? { opened_blocks: data.openedBlocks } : {}),
+          ...(typeof data.closedBlocks === 'number' ? { closed_blocks: data.closedBlocks } : {}),
+          ...(typeof data.fileCount === 'number' ? { file_count: data.fileCount } : {}),
+          ...(Array.isArray(data.files)
+            ? { files: data.files.filter((file) => typeof file === 'string').slice(0, 8) }
+            : {}),
+          ...(typeof data.pendingCandidateChars === 'number'
+            ? { pending_candidate_chars: data.pendingCandidateChars }
+            : {}),
+          ...(typeof data.suppressing === 'boolean' ? { suppressing: data.suppressing } : {}),
+          ...(data.shape && typeof data.shape === 'object' ? { shape: data.shape } : {}),
+        },
+        metadata: {
+          diagnostic_name: diagnosticName,
         },
       });
     }
@@ -657,7 +781,7 @@ function buildTraceSafeManifests(args: {
   projectId: string | null | undefined;
   runId: string;
   attachmentsRaw: unknown;
-  producedFilesRaw: unknown;
+  traceObjectFilesRaw: unknown;
 }): TraceSafeManifestResult {
   const attachmentManifest: AttachmentManifestEntry[] = [];
   const artifactManifest: ArtifactManifestEntry[] = [];
@@ -720,8 +844,8 @@ function buildTraceSafeManifests(args: {
     unavailable = true;
   }
 
-  if (Array.isArray(args.producedFilesRaw)) {
-    for (const [index, raw] of args.producedFilesRaw.entries()) {
+  if (Array.isArray(args.traceObjectFilesRaw)) {
+    for (const [index, raw] of args.traceObjectFilesRaw.entries()) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         partial = true;
         continue;
@@ -789,7 +913,7 @@ function buildTraceSafeManifests(args: {
         approved_by: null,
       });
     }
-  } else if (args.producedFilesRaw !== undefined && args.producedFilesRaw !== null) {
+  } else if (args.traceObjectFilesRaw !== undefined && args.traceObjectFilesRaw !== null) {
     unavailable = true;
   }
 
@@ -797,6 +921,45 @@ function buildTraceSafeManifests(args: {
     attachmentManifest,
     artifactManifest,
     completeness: unavailable ? 'unavailable' : partial ? 'partial' : 'complete',
+  };
+}
+
+function traceObjectFilesForTelemetry(traceObjectFilesRaw: unknown, producedFilesRaw: unknown): unknown {
+  return Array.isArray(traceObjectFilesRaw) ? traceObjectFilesRaw : producedFilesRaw;
+}
+
+function buildTraceObjectSummary(args: {
+  traceObjectFilesRaw: unknown;
+  uploaded?: FinalTraceSafeManifests | TraceObjectUploadManifests;
+}): TraceObjectSummary {
+  const files = Array.isArray(args.traceObjectFilesRaw)
+    ? args.traceObjectFilesRaw.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) as Array<Record<string, unknown>>
+    : [];
+  const byReason = (reason: string) =>
+    files.filter((file) => file.traceObjectReason === reason).length;
+  const entries = args.uploaded?.artifactManifest ?? [];
+  const skipReasons: Record<string, number> = {};
+  let uploadedCount = 0;
+  for (const entry of entries) {
+    if (entry.status === 'ok' && entry.stored_in_open_design === true) {
+      uploadedCount += 1;
+      continue;
+    }
+    const reason = entry.reason ?? entry.status;
+    skipReasons[reason] = (skipReasons[reason] ?? 0) + 1;
+  }
+  if (files.length > 0 && entries.length === 0) {
+    skipReasons.object_upload_unavailable = files.length;
+  }
+  return {
+    new_file_count: byReason('new'),
+    modified_file_count: byReason('modified'),
+    recovered_file_count: byReason('recovered'),
+    candidate_file_count: files.length,
+    uploaded_file_count: uploadedCount,
+    skipped_file_count: Math.max(0, entries.length - uploadedCount) +
+      (entries.length === 0 ? files.length : 0),
+    skip_reasons: skipReasons,
   };
 }
 
@@ -839,9 +1002,11 @@ export async function reportRunCompletedFromDaemon(
       return deriveLangfuseDeliveryState(prefs, null);
     }
     const installationId = cfg.installationId ?? null;
+    const configuredAmrEnv = agentCliEnvForAgent(cfg.agentCliEnv, 'amr');
 
     let messageContent = '';
     let producedFilesRaw: unknown = undefined;
+    let traceObjectFilesRaw: unknown = undefined;
     let attachmentsRaw: unknown = undefined;
     if (run.conversationId && run.assistantMessageId) {
       try {
@@ -860,6 +1025,7 @@ export async function reportRunCompletedFromDaemon(
           messageContent = typeof m.content === 'string' ? m.content : '';
           // listMessages returns producedFiles already parsed (db.ts:965).
           producedFilesRaw = m.producedFiles;
+          traceObjectFilesRaw = traceObjectFilesForTelemetry(m.traceObjectFiles, producedFilesRaw);
           attachmentsRaw = collectPriorUserAttachments(allMessages, assistantIndex);
         }
       } catch (err) {
@@ -902,6 +1068,8 @@ export async function reportRunCompletedFromDaemon(
       },
       ...(errorCode ? { errorCode } : {}),
       agentId: run.agentId,
+      cancelOrigin: run.cancelOrigin ?? null,
+      terminalTrigger: run.terminalTrigger ?? null,
       events: run.events,
     });
     const timings = summarizeRunTimingAnalytics({
@@ -921,8 +1089,12 @@ export async function reportRunCompletedFromDaemon(
     const runtime: RuntimeInfo = {
       ...getRuntimeInfo(opts.appVersion ?? null),
       ...(run.clientType ? { clientType: run.clientType } : {}),
+      ...(getDetectedRuntimeVersions(run.agentId) ?? {}),
+      ...(run.preflightAgentCliVersion
+        ? { agentCliVersion: run.preflightAgentCliVersion }
+        : {}),
     };
-    const artifacts = summarizeProducedFiles(producedFilesRaw);
+    const artifacts = summarizeProducedFiles(traceObjectFilesRaw);
     const diagnostics = summarizeRunDiagnosticsForAnalytics({
       events: run.events,
       exitCode: run.exitCode ?? null,
@@ -935,7 +1107,7 @@ export async function reportRunCompletedFromDaemon(
       projectId: run.projectId,
       runId: run.id,
       attachmentsRaw,
-      producedFilesRaw,
+      traceObjectFilesRaw,
     });
     const objectManifestOptions = {
       installationId,
@@ -944,12 +1116,18 @@ export async function reportRunCompletedFromDaemon(
       projectsRoot: path.join(dataDir, 'projects'),
       ...(run.projectMetadata ? { projectMetadata: run.projectMetadata } : {}),
       ...(run.projectAttachmentPaths ? { attachmentPaths: run.projectAttachmentPaths } : {}),
-      artifacts: buildTraceObjectArtifactSources(producedFilesRaw),
+      artifacts: buildTraceObjectArtifactSources(traceObjectFilesRaw),
       prompt: telemetryPrompt,
       prefs,
       ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
     } satisfies Parameters<typeof buildTraceObjectManifests>[0];
-    const buildContext = (finalManifests: FinalTraceSafeManifests): ReportContext => ({
+    const buildContext = (
+      finalManifests: FinalTraceSafeManifests,
+      traceObjectSummary = buildTraceObjectSummary({
+        traceObjectFilesRaw,
+        uploaded: finalManifests,
+      }),
+    ): ReportContext => ({
       installationId,
       projectId: run.projectId ?? '',
       conversationId: run.conversationId ?? '',
@@ -967,6 +1145,16 @@ export async function reportRunCompletedFromDaemon(
         ...(stderr ? { stderr } : {}),
         ...(stdout ? { stdout } : {}),
         diagnostics,
+        retryAttemptCount: run.retryAttemptCount ?? 0,
+        ...(run.retryFinalResult
+          ? { retryFinalResult: run.retryFinalResult }
+          : {}),
+        ...(run.retrySuppressedReason
+          ? { retrySuppressedReason: run.retrySuppressedReason }
+          : {}),
+        ...(run.retryOriginalFailure
+          ? { retryOriginalFailure: run.retryOriginalFailure }
+          : {}),
       },
       message: {
         messageId: run.assistantMessageId ?? '',
@@ -985,6 +1173,7 @@ export async function reportRunCompletedFromDaemon(
         ? { inputTextSnapshotManifest: finalManifests.inputTextSnapshotManifest }
         : {}),
       manifestCompleteness: finalManifests.completeness,
+      traceObjectSummary,
       tools: collectToolCalls(run.events, startedAt, endedAt),
       agentEvents: collectAgentEvents(run.events, startedAt, endedAt, run.agentId),
       eventsSummary: summarizeEvents(run.events, durationMs),
@@ -998,21 +1187,45 @@ export async function reportRunCompletedFromDaemon(
       ...objectManifestOptions,
       uploadMode: 'manifest-only',
     });
+    const finalTelemetryConfig = readRunTelemetrySinkConfig(
+      process.env,
+      configuredAmrEnv,
+    );
+    let uploadedManifests: TraceObjectUploadManifests | undefined;
+    let finalObjectManifests = registrationManifests;
+
     if (registrationManifests) {
-      await reportRunCompleted(
-        buildContext(mergeTraceSafeManifests(manifests, registrationManifests)),
-        {
-          config: objectRegistrationTelemetryConfig(),
-          ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
-        },
-      );
+      // Authenticated runs register object authority through Vela's signed
+      // service path. Anonymous/direct runs retain the legacy relay boundary.
+      // The authority worker handles registration_only without writing a
+      // content-free Langfuse trace.
+      const registrationTelemetryConfig = finalTelemetryConfig?.kind === 'vela'
+        ? finalTelemetryConfig
+        : objectRegistrationTelemetryConfig();
+      if (registrationTelemetryConfig) {
+        await reportRunCompleted(
+          buildContext(mergeTraceSafeManifests(manifests, registrationManifests)),
+          {
+            config: registrationTelemetryConfig,
+            deliveryPurpose: 'object-registration',
+            ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+          },
+        );
+        uploadedManifests = await buildTraceObjectManifests(objectManifestOptions);
+        finalObjectManifests = uploadedManifests ?? registrationManifests;
+      }
     }
 
-    const uploadedManifests = await buildTraceObjectManifests(objectManifestOptions);
-    const finalManifests = mergeTraceSafeManifests(manifests, uploadedManifests);
+    const finalManifests = mergeTraceSafeManifests(manifests, finalObjectManifests);
     return await reportRunCompleted(
-      buildContext(finalManifests),
-      opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {},
+      buildContext(finalManifests, buildTraceObjectSummary({
+        traceObjectFilesRaw,
+        ...(uploadedManifests ? { uploaded: uploadedManifests } : {}),
+      })),
+      {
+        config: finalTelemetryConfig,
+        ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+      },
     );
   } catch (err) {
     console.warn('[langfuse-bridge] report failed:', String(err));
@@ -1065,7 +1278,8 @@ export async function reportRunFeedbackFromDaemon(
   // Pre-resolve the sink before claiming `accepted`. Avoids advertising a
   // successful enqueue to callers when there's no Langfuse endpoint
   // configured to ship the score to.
-  const sink = readTelemetrySinkConfig();
+  const configuredAmrEnv = agentCliEnvForAgent(cfg.agentCliEnv, 'amr');
+  const sink = readFeedbackTelemetrySinkConfig(process.env, configuredAmrEnv);
   if (!sink) {
     return { status: 'skipped_no_sink' };
   }
@@ -1085,7 +1299,10 @@ export async function reportRunFeedbackFromDaemon(
   // telemetry, not a client-facing signal.
   void reportRunFeedback(
     ctx,
-    opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {},
+    {
+      configuredEnv: configuredAmrEnv,
+      ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+    },
   ).catch((err) => {
     console.warn('[langfuse-bridge] feedback report failed:', String(err));
   });

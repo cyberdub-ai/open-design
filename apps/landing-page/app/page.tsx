@@ -1,5 +1,5 @@
 /*
- * Open Design — Atelier Zero landing page.
+ * OpenDesign — Atelier Zero landing page.
  *
  * Mirrors `design-templates/open-design-landing/example.html` 1:1. When the canonical
  * example.html changes, mirror the diff here and into `app/globals.css`.
@@ -28,10 +28,10 @@ import {
   heroBgImage,
   heroBgSrcset,
   heroProductImage,
-  heroProductSrcset,
   PRECISE_LAZY_PLACEHOLDER,
 } from './image-assets';
-import { getHomeExtra } from './home-translations';
+import { getHomeExtra, getHomeCta } from './home-translations';
+import { getFooterLegalCopy } from './footer-legal-i18n';
 
 /**
  * `<img>` wrapper for non-hero homepage images. Outputs `data-precise-src`
@@ -63,6 +63,36 @@ function BreakText({ text }: { text: string }) {
           {part}
         </span>
       ))}
+    </>
+  );
+}
+
+function HighlightedBreakText({
+  text,
+  highlight,
+}: {
+  text: string;
+  highlight?: string;
+}) {
+  return (
+    <>
+      {text.split('\n').map((line, index) => {
+        const highlightIndex = highlight ? line.indexOf(highlight) : -1;
+        return (
+          <span key={`${line}-${index}`}>
+            {index > 0 ? <br /> : null}
+            {highlightIndex >= 0 && highlight ? (
+              <>
+                {line.slice(0, highlightIndex)}
+                <strong className='hero-sub-highlight'>{highlight}</strong>
+                {line.slice(highlightIndex + highlight.length)}
+              </>
+            ) : (
+              line
+            )}
+          </span>
+        );
+      })}
     </>
   );
 }
@@ -101,6 +131,52 @@ function BlurText({
           {by === 'words' && i < parts.length - 1 ? NBSP : ''}
         </span>
       ))}
+    </>
+  );
+}
+
+function blurTextTokenCount(text: string, by: 'words' | 'letters') {
+  return by === 'words' ? text.split(' ').length : Array.from(text).length;
+}
+
+/** Keeps the reveal stagger intact while giving one semantic phrase a marker. */
+function EmphasizedBlurText({
+  text,
+  emphasis,
+  by,
+  start,
+}: {
+  text: string;
+  emphasis?: string;
+  by: 'words' | 'letters';
+  start: number;
+}) {
+  const emphasisStart = emphasis ? text.indexOf(emphasis) : -1;
+  if (!emphasis || emphasisStart < 0) {
+    return <BlurText text={text} by={by} start={start} />;
+  }
+
+  const segments = [
+    { key: 'before', text: text.slice(0, emphasisStart), emphasized: false },
+    { key: 'emphasis', text: emphasis, emphasized: true },
+    { key: 'after', text: text.slice(emphasisStart + emphasis.length), emphasized: false },
+  ].filter((segment) => segment.text.length > 0);
+  let segmentStart = start;
+
+  return (
+    <>
+      {segments.map((segment) => {
+        const currentStart = segmentStart;
+        segmentStart += blurTextTokenCount(segment.text, by);
+        const content = <BlurText text={segment.text} by={by} start={currentStart} />;
+        return segment.emphasized ? (
+          <span className='hero-task-emphasis' key={segment.key}>
+            {content}
+          </span>
+        ) : (
+          <span key={segment.key}>{content}</span>
+        );
+      })}
     </>
   );
 }
@@ -159,14 +235,15 @@ const NBSP = '\u00A0';
 // inline enhancement script in `app/pages/index.astro` assigns `textContent`
 // on each slot, so any extra text inside the wrapper would be clobbered.
 const REPO = 'https://github.com/nexu-io/open-design';
+const FEISHU_COMMUNITY_URL = 'https://od.kokiai.net/community/website';
+const DISCORD_URL = 'https://discord.gg/mHAjSMV6gz';
 const REPO_RELEASES = `${REPO}/releases`;
 const REPO_ISSUES = `${REPO}/issues`;
-const REPO_CONTRIBUTORS = `${REPO}/graphs/contributors`;
 const REPO_DAEMON = `${REPO}/tree/main/apps/daemon`;
 const REPO_SKILLS = `${REPO}/tree/main/skills`;
 const REPO_DOCS = `${REPO}#readme`;
-const DISCORD = 'https://discord.gg/9ptkbbqRu';
-const X_TWITTER = 'https://x.com/nexudotio';
+const DISCORD = 'https://discord.gg/mHAjSMV6gz';
+const X_TWITTER = 'https://x.com/OpenDesignHQ';
 const YOUTUBE = 'https://www.youtube.com/channel/UChtshixMhvtgBWzoD9R_Qfg';
 
 // Footer columns mirror the top-nav sections + `site-footer.astro` (the
@@ -190,13 +267,6 @@ const FOOTER_AGENTS = [
   { name: 'OpenCode', route: 'opencode-design' },
 ] as const;
 
-// Legal / company labels — small inline map (en/zh/zh-tw, fallback en) kept
-// identical to `site-footer.astro` so the two footers never drift.
-const FOOTER_LEGAL = {
-  en: { company: 'Company', about: 'About', faq: 'FAQ', privacy: 'Privacy Policy', terms: 'Terms', allAgents: 'All agents' },
-  zh: { company: '公司', about: '关于', faq: '常见问题', privacy: '隐私政策', terms: '服务条款', allAgents: '全部 Agent' },
-  'zh-tw': { company: '公司', about: '關於', faq: '常見問題', privacy: '隱私政策', terms: '服務條款', allAgents: '全部 Agent' },
-} satisfies Record<string, Record<string, string>>;
 
 const ext = {
   target: '_blank',
@@ -240,12 +310,15 @@ interface PageProps {
    * fractions, and the footer Library never disagree.
    */
   counts: HeaderProps['counts'] & {
+    /** User-facing bundled plugins shown in the public plugin library. */
+    plugins: number;
     /** Optional richer breakdown used by the Labs filter pills. */
     byMode?: Readonly<Record<string, number>>;
     byPlatform?: Readonly<Record<string, number>>;
   };
   github: {
     starsLabel: string;
+    contributorsCount: number;
     versionLabel: string;
   };
   /** FAQ pairs rendered above the closing CTA. Content comes from `getHomeFaq`. */
@@ -317,11 +390,25 @@ export default function Page({
   // once (the Chinese design); `t` supplies the translated text per locale so
   // all languages render the same structure. CJK locales use per-letter blur.
   const t = getHomeExtra(locale);
+  const cta = getHomeCta(locale);
   const cjk = locale === 'zh' || locale === 'zh-tw' || locale === 'ja' || locale === 'ko';
+  const heroTaskBy = cjk ? 'letters' : 'words';
+  const heroTaskLines = t.heroTaskLines ?? [
+    t.heroTaskTitle ??
+      'One design system. Brand-consistent web, slides, prototypes, dashboards, images, and video',
+  ];
+  let heroTaskStart = 2;
   // Short inline labels still fall back to English for non-Chinese locales.
   const tt = (zh: string, en: string) => (locale === 'zh' ? zh : en);
   const skills = fmt(counts.skills);
   const systems = fmt(counts.systems);
+  // Design Systems stat card: derive from the raw count so a missing count
+  // keeps the neutral "—" fallback with no countup metadata (never "—+" nor a
+  // non-finite data-countup-to). `to: null` makes the renderer skip countup.
+  const systemsCardNum = counts.systems > 0 ? `${counts.systems}+` : '—';
+  const systemsCardTo: string | null = counts.systems > 0 ? String(counts.systems) : null;
+  const pluginsCardNum = counts.plugins > 0 ? `${counts.plugins}+` : '—';
+  const pluginsCardTo: string | null = counts.plugins > 0 ? String(counts.plugins) : null;
   const deckCount = pad2(counts.byMode?.deck);
   const prototypeCount = pad2(counts.byMode?.prototype);
   const mobileCount = pad2(counts.byPlatform?.mobile);
@@ -329,14 +416,34 @@ export default function Page({
   const home = getHomePageCopy(locale);
   const ui = getLandingUiCopy(locale);
   const menu = getHeaderProductMenuCopy(locale);
-  const footL =
-    FOOTER_LEGAL[locale as keyof typeof FOOTER_LEGAL] ?? FOOTER_LEGAL.en;
+  const footL = getFooterLegalCopy(locale);
   const localeDef = getLocaleDefinition(locale);
   const localeOptions = LANDING_LOCALES.map((entry) => ({
     ...entry,
     href: localePath(entry.code, '/'),
   }));
   const href = (path: string) => localizedHref(path, locale);
+  // First-screen product walkthrough. Rendered as a click-to-play facade
+  // (poster + play button); the inline hero-video script in pages/index.astro
+  // swaps in the YouTube iframe on demand so the hero ships no third-party code.
+  const HERO_VIDEO_ID = 'fZbCLD9PZBo';
+  // Community entry beside the hero download CTA (Feishu for zh / zh-tw, Discord elsewhere).
+  const usesFeishuCommunity = locale === 'zh' || locale === 'zh-tw';
+  const communityCopy =
+    locale === 'zh'
+      ? { cta: '加入飞书群', qrHint: '扫码加入 OpenDesign 飞书群', perk: '领 Credits' }
+      : locale === 'zh-tw'
+        ? { cta: '加入飛書群', qrHint: '掃碼加入 OpenDesign 飛書群', perk: '領 Credits' }
+        : { cta: 'Join Discord', qrHint: '', perk: 'Credits' };
+  // Core-trait chips between the headline and the CTAs. zh / zh-tw / en are
+  // hand-written; every other locale falls back to English.
+  const heroTags =
+    locale === 'zh'
+      ? ['品牌一致性设计', '开源 · Apache-2.0', 'BYOK · 支持 21 款 Coding Agent 接入', '本地运行 · 数据不出设备', '多人设计协作']
+      : locale === 'zh-tw'
+        ? ['品牌一致性設計', '開源 · Apache-2.0', 'BYOK · 支援 21 款 Coding Agent 接入', '本地執行 · 資料不出裝置', '多人設計協作']
+        : ['On-brand by design', 'Open source · Apache-2.0', 'BYOK · 21 coding agents', 'Local · data stays on-device', 'Team collaboration'];
+  const heroVideoPoster = `https://i.ytimg.com/vi/${HERO_VIDEO_ID}/maxresdefault.jpg`;
 
   /**
    * Capability cards. The zh homepage renders the five-step flow verbatim
@@ -444,21 +551,49 @@ export default function Page({
           />
           <div className='container hero-grid'>
             <div className='hero-copy'>
-              <p className='hero-lead' data-reveal>
-                {t.heroLead}
-              </p>
+              {/* The "best open-source Claude Design alternative" entry term is
+                  kept in the SEO layer only (title / description / JSON-LD);
+                  the first screen leads straight with the brand + positioning. */}
               <h1 className='hero-title' data-reveal>
                 <span className='hero-title-corner tl' aria-hidden='true' />
                 <span className='hero-title-corner tr' aria-hidden='true' />
                 <span className='hero-title-corner bl' aria-hidden='true' />
                 <span className='hero-title-corner br' aria-hidden='true' />
-                <span className='hero-title-brand'>
-                  <BlurText text='Open Design' by='words' start={0} />
+                {/* Two-layer message: the brand-positioning headline, then the
+                    design-system + scenario claim. The agent value promise
+                    lives in the ABOUT statement below. */}
+                <span className='hero-title-position'>
+                  <BlurText
+                    text={t.heroPositionTitle ?? 'Vibe Design Workspace'}
+                    by='words'
+                    start={1}
+                  />
                 </span>
-                <span className='hero-title-sub'>
-                  <BlurText text={t.heroTitleSub} by={cjk ? 'letters' : 'words'} start={2} />
+                <span className='hero-title-main'>
+                  {heroTaskLines.map((line) => {
+                    const start = heroTaskStart;
+                    heroTaskStart +=
+                      blurTextTokenCount(line, heroTaskBy);
+                    return (
+                      <span className='hero-title-main-line' key={line}>
+                        <EmphasizedBlurText
+                          text={line}
+                          emphasis={t.heroTaskEmphasis}
+                          by={heroTaskBy}
+                          start={start}
+                        />
+                      </span>
+                    );
+                  })}
                 </span>
               </h1>
+              <ul className='hero-tags' data-reveal aria-label='Core traits'>
+                {heroTags.map((tag) => (
+                  <li className='hero-tag' key={tag}>
+                    {tag}
+                  </li>
+                ))}
+              </ul>
               <div className='hero-actions' data-reveal>
                 {/* Platform-aware download: `enhanceDownloadCta` in the inline
                     script of pages/index.astro rewrites href to the matching
@@ -468,39 +603,99 @@ export default function Page({
                     rate-limited) it falls back to the /download/ page (the
                     per-platform picker) rather than the GitHub releases list. */}
                 <a
-                  className='btn btn-primary'
+                  className='hm-dl hm-dl-hero'
                   href={href('/download/')}
                   data-download-cta
+                  data-direct-download
                   data-download-chip-target
                   data-download-placement='hero'
                 >
-                  <span className='arrow'>{iconDownload}</span>
+                  <em className='hm-di' aria-hidden='true'>
+                    ↓
+                  </em>
                   {home.hero.download}
+                  <u className='hm-sheen' aria-hidden='true' />
                 </a>
-                <a className='btn btn-ghost' href={REPO} {...ext}>
-                  <span className='arrow'>{<RemixIcon glyph={RI.github} />}</span>
-                  <span>
-                    Star{' '}
-                    <span className='star-count' data-github-stars>
-                      {github.starsLabel}
-                    </span>
-                  </span>
-                </a>
+                {/* Community entry beside the download CTA. zh / zh-tw get the
+                    Feishu group (hover reveals the QR); every other locale gets
+                    Discord. Secondary, outlined pill at the same height. */}
+                <div
+                  className='hero-community'
+                  data-community-platform={usesFeishuCommunity ? 'feishu' : 'discord'}
+                >
+                  <a
+                    className='hero-community-cta'
+                    href={usesFeishuCommunity ? FEISHU_COMMUNITY_URL : DISCORD_URL}
+                    target='_blank'
+                    rel='noopener'
+                    data-community-cta
+                    data-community-platform={usesFeishuCommunity ? 'feishu' : 'discord'}
+                  >
+                    {usesFeishuCommunity ? (
+                      <img
+                        className='hero-community-icon hero-community-icon-feishu'
+                        src='/launch-week/feishu-mark.png'
+                        alt=''
+                        width={24}
+                        height={19}
+                        decoding='async'
+                      />
+                    ) : (
+                      <svg className='hero-community-icon hero-community-icon-discord' viewBox='0 0 24 24' aria-hidden='true'>
+                        <path d='M20.317 4.369a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.6 12.6 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.74 19.74 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.061 0a.074.074 0 0 1 .078.009c.12.099.246.198.373.292a.077.077 0 0 1-.006.127c-.598.349-1.22.645-1.873.891a.076.076 0 0 0-.04.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.056c.5-5.177-.838-9.674-3.549-13.66a.06.06 0 0 0-.031-.028zM8.02 15.331c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z' />
+                      </svg>
+                    )}
+                    {communityCopy.cta}
+                    <span className='hero-community-perk'>{communityCopy.perk}</span>
+                  </a>
+                  {usesFeishuCommunity ? (
+                    <div className='hero-community-qr-card' role='tooltip'>
+                      <img
+                        className='hero-community-qr-img'
+                        src='/community/feishu-group-qr.png'
+                        alt={communityCopy.qrHint}
+                        width={168}
+                        height={168}
+                        loading='lazy'
+                        decoding='async'
+                      />
+                      <span className='hero-community-qr-hint'>{communityCopy.qrHint}</span>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-              <p className='hero-sub' data-reveal>
-                <BreakText text={t.heroSub} />
-              </p>
-              <div className='hero-shot' data-reveal>
-                <img
-                  src={heroProductImage}
-                  srcSet={heroProductSrcset}
-                  sizes='(max-width: 768px) 100vw, 60vw'
-                  width={2508}
-                  height={1450}
-                  alt='Open Design desktop — design files & index.html preview'
-                  decoding='async'
-                  className='hero-shot-img'
-                />
+              {/* Product walkthrough sits just under the hero copy, in the
+                  slot the static product shot used to occupy (that shot now
+                  lives in the ABOUT section). Click-to-play facade: poster
+                  image + button, iframe injected on demand. */}
+              <div className='hero-shot hero-video' data-reveal>
+                <div
+                  className='hero-video-frame'
+                  data-hero-video
+                  data-video-id={HERO_VIDEO_ID}
+                >
+                  <img
+                    className='hero-video-poster'
+                    src={heroVideoPoster}
+                    width={1280}
+                    height={720}
+                    alt='OpenDesign product walkthrough video'
+                    decoding='async'
+                    fetchPriority='low'
+                  />
+                  {/* The labelled button is the single focus target: native
+                      Enter / Space activate it, the frame only mirrors the
+                      click for pointer users who hit the poster. */}
+                  <button
+                    type='button'
+                    className='hero-video-play'
+                    aria-label='Play the OpenDesign walkthrough video'
+                  >
+                    <svg viewBox='0 0 24 24' width='30' height='30' aria-hidden='true'>
+                      <path d='M8 5.5v13l11-6.5z' fill='currentColor' />
+                    </svg>
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -512,7 +707,7 @@ export default function Page({
             <div className='about-grid'>
               <div className='about-copy' data-reveal>
                 <p className='about-kicker'>
-                  {locale === 'zh' ? '为什么选择 Open Design？' : 'Why Open Design?'}
+                  {locale === 'zh' ? '为什么选择 OpenDesign？' : 'Why OpenDesign?'}
                 </p>
                 {/*
                   Text Scroll Reveal (Magic UI / Inspira port): a tall track
@@ -524,7 +719,7 @@ export default function Page({
                 <div className='about-reveal' data-about-reveal>
                   <div className='about-reveal-sticky'>
                     <h2 className='display about-reveal-text'>
-                      {tokenizeReveal(t.aboutStatement).map((tok, i) =>
+                      {tokenizeReveal(t.aboutStatement.replace('{systems}', systems)).map((tok, i) =>
                         tok.type === 'space' ? (
                           <span className='reveal-space' key={i}>
                             {' '}
@@ -574,10 +769,10 @@ export default function Page({
                   <div className='about-panels'>
                     <div className='about-track'>
                     <div className='about-panel'>
-                      <div className='about-panel-img about-panel-img-bare about-panel-img-captioned'>
+                      <div className='about-panel-img about-panel-img-bare about-panel-img-captioned about-panel-img-shot'>
                         <LazyImg
-                          src='/about/desktop-native.webp'
-                          alt='设计在桌面端发生。本地文件、Figma 导出、代码仓库直接可读，Agent 拥有终端执行全部能力。'
+                          src={heroProductImage}
+                          alt={t.aboutCap1.replace(/\n/g, ' ')}
                         />
                         <p className='about-panel-caption'>
                           <BreakText text={t.aboutCap1} />
@@ -588,7 +783,7 @@ export default function Page({
                       <div className='about-panel-img about-panel-img-bare about-panel-img-captioned'>
                         <LazyImg
                           src='/about/access-agent.webp'
-                          alt='你电脑上的 Claude Code / Codex / Cursor 已经够强。OD 做的是把它们接进完整设计工作流。'
+                          alt={t.aboutCap2.replace(/\n/g, ' ')}
                         />
                         {/* Caption laid over the image's baked-in white card. */}
                         <p className='about-panel-caption'>
@@ -600,7 +795,7 @@ export default function Page({
                       <div className='about-panel-img about-panel-img-bare about-panel-img-captioned'>
                         <LazyImg
                           src='/about/self-evolution.webp?v=4'
-                          alt='每次选择都沉淀为 Design System、偏好和记忆，下次生成更接近你要的结果。'
+                          alt={t.aboutCap3.replace(/\n/g, ' ')}
                         />
                         <p className='about-panel-caption'>
                           {t.aboutCap3}
@@ -608,6 +803,23 @@ export default function Page({
                       </div>
                     </div>
                     </div>
+                  </div>
+                  {/* Per-tab hub link. OUTSIDE .about-panels (overflow:hidden +
+                      image-height-locked, so a link inside a panel is clipped).
+                      As a sibling of the tab radios, the active tab reveals its
+                      matching CTA via `:checked ~` in globals.css. */}
+                  {/* One static CTA row for the whole About block: design-system
+                      link + download. Agents live in the Method section now, so
+                      they're intentionally not repeated here. */}
+                  <div className='about-ctas cta-pair'>
+                    <a className='btn btn-ghost' href={href('/plugins/systems/')}>
+                      {cta.systems}
+                      <span className='arrow'>{arrowOut}</span>
+                    </a>
+                    <a className='btn btn-primary' href={href('/download/')} data-download-cta data-download-chip-target data-download-placement='about'>
+                      <span className='arrow'>{iconDownload}</span>
+                      {home.hero.download}
+                    </a>
                   </div>
                 </div>
                 </div>
@@ -638,20 +850,25 @@ export default function Page({
                 >
                   <div className='cap-sticky'>
                     <div className='capabilities-head'>
-                      <h2 className='display'>
-                        {t.capTitle}
-                        {/* Draggable "DONE 👌" mark, 20px after the heading. */}
-                        <img
-                          className='cap-head-icon'
-                          src='/hero-icon-drag.svg'
-                          alt='Done 👌'
-                          width={252}
-                          height={300}
-                          draggable={false}
-                          data-drag-icon
-                          decoding='async'
-                        />
-                      </h2>
+                      <h2 className='display'>{t.capTitle}</h2>
+                      {/* Draggable "DONE 👌" mark. Kept a DIRECT child of
+                          .capabilities-head (not nested in the <h2>) so the
+                          authored layout rules actually bind to it: on desktop
+                          it's a flex item beside the heading (20px column-gap),
+                          and on mobile it's a grid item (grid-area: icon) that
+                          moves next to the two-up steps. Nested inside the
+                          heading, grid-area never applied and the mark stayed
+                          stuck in the title row. */}
+                      <img
+                        className='cap-head-icon'
+                        src='/hero-icon-drag.svg'
+                        alt='Done 👌'
+                        width={252}
+                        height={300}
+                        draggable={false}
+                        data-drag-icon
+                        decoding='async'
+                      />
                       {/* Pipeline-style leads (Brief → … → 记忆沉淀) must hold
                           a single line at every viewport; prose leads keep
                           the normal 36ch wrap. Detected by the arrow glyph. */}
@@ -666,6 +883,7 @@ export default function Page({
                       </p>
                     </div>
                     <div className='cap-row'>
+                      <div className='cap-steps-col'>
                       <ol className='cap-steps'>
                         {capabilityCards.map((card, index) => (
                           <li
@@ -679,6 +897,22 @@ export default function Page({
                           </li>
                         ))}
                       </ol>
+                      <div className='cta-pair cap-steps-link'>
+                        <a className='btn btn-ghost' href={href('/solutions/')}>
+                          {cta.solutions}
+                          <span className='arrow'>{arrowOut}</span>
+                        </a>
+                        <a
+                          className='btn btn-primary'
+                          href={href('/download/')}
+                          data-download-cta
+                          data-download-placement='capabilities'
+                        >
+                          <span className='arrow'>{iconDownload}</span>
+                          {home.hero.download}
+                        </a>
+                      </div>
+                      </div>
                       <div className='cap-visual'>
                         {capabilityCards.map((card, index) => (
                           <div
@@ -717,16 +951,35 @@ export default function Page({
               <div data-reveal>
                 <h2 className='display'>
                   {t.labsPre}
-                  <em>Open Design</em>
+                  <em>OpenDesign</em>
                   {t.labsPost}
                 </h2>
+                {t.labsLead ? (
+                  <p className='labs-lead'>{t.labsLead}</p>
+                ) : null}
+                <div className='cta-pair' style={{ justifyContent: 'center', marginTop: 20 }}>
+                  <a className='btn btn-ghost' href={href('/plugins/templates/')}>
+                    {cta.templates}
+                    <span className='arrow'>{arrowOut}</span>
+                  </a>
+                  <a
+                    className='btn btn-primary'
+                    href={href('/download/')}
+                    data-download-cta
+                    data-download-chip-target
+                    data-download-placement='labs'
+                  >
+                    <span className='arrow'>{iconDownload}</span>
+                    {home.hero.download}
+                  </a>
+                </div>
               </div>
             </div>
             {/* Labs — a clean image preview driven by the mode Dock below it.
                 The app-window chrome is gone; the Dock magnifies on hover and
                 its tiles switch / auto-cycle the preview image in place
                 (enhancers in `pages/index.astro`). */}
-            <div className='lab-stage' data-reveal>
+            <div className='lab-stage' data-reveal data-precise-bg>
               {/* Floating artifact card layered over the painting background.
                   `enhanceLabSwitch` (pages/index.astro) swaps its src from the
                   dock and toggles visibility; the "图片" tile maps to the
@@ -812,6 +1065,15 @@ export default function Page({
               <div className='right' data-reveal='right'>
                 <p>{home.method.lead}</p>
               </div>
+              <a
+                className='btn btn-ghost method-link'
+                href={href('/agents/')}
+                style={{ marginTop: 16 }}
+                data-reveal
+              >
+                {cta.agents}
+                <span className='arrow'>{arrowOut}</span>
+              </a>
             </div>
             {/* FallingText (React Bits, matter-js) — the coding-agent names
                 drop into a physics playground on hover; driven by the
@@ -851,24 +1113,31 @@ export default function Page({
               <div className='testimonial-copy' data-reveal>
                 <h2 style={{ marginTop: 30 }}>
                   {t.testiPre}
-                  <span data-github-contributors>326</span>
+                  <span data-github-contributors>{github.contributorsCount}</span>
                   {t.testiMid}
                   <br />
                   <span style={{ whiteSpace: 'nowrap' }}>{t.testiPost}</span>
                 </h2>
-                <a
-                  className='btn btn-ghost'
-                  href={REPO_CONTRIBUTORS}
-                  style={{ marginTop: 16 }}
-                  {...ext}
-                >
-                  {tt('查看全部贡献者', 'View all contributors')}
-                  <span className='arrow'>{arrowOut}</span>
-                </a>
+                <div className='cta-pair' style={{ marginTop: 16 }}>
+                  <a className='btn btn-ghost' href='/community/contributors/'>
+                    {cta.contributors}
+                    <span className='arrow'>{arrowOut}</span>
+                  </a>
+                  <a
+                    className='btn btn-primary'
+                    href={href('/download/')}
+                    data-download-cta
+                    data-download-chip-target
+                    data-download-placement='contributors'
+                  >
+                    <span className='arrow'>{iconDownload}</span>
+                    {home.hero.download}
+                  </a>
+                </div>
               </div>
               <div className='testimonial-globe' data-reveal='right' data-testimonial-globe>
                 <canvas
-                  aria-label='Open Design global contributor map'
+                  aria-label='OpenDesign global contributor map'
                   className='testimonial-globe-canvas'
                   height={720}
                   width={720}
@@ -888,20 +1157,21 @@ export default function Page({
         {/* ====== SELECTED WORK ====== */}
         <section className='tight' data-od-id='work'>
           <h2 className='work-stats-title' data-reveal>
-            {tt('我们的项目获得了：', 'What this project has earned')}
+            {cta.statsTitle}
           </h2>
           <div className='work'>
             <div className='work-stats-grid' data-reveal>
                 {([
                   // `live` cards show the real-time GitHub count (filled by the
                   // [data-github-stars] / [data-github-contributors] enhancers in
-                  // index.astro); the hard-coded `num` is only the SSR fallback
-                  // shown until the API responds. The rest count up from 0.
-                  { src: 'card-1.webp', num: '52K+', to: '52', suffix: 'K+', alt: 'GitHub Stars', href: REPO, live: 'stars' as const },
-                  { src: 'card-2.webp', num: '280+', to: '280', suffix: '+', alt: tt('贡献者', 'Contributors'), href: `${REPO}/graphs/contributors`, live: 'contributors' as const },
-                  { src: 'card-3.webp', num: '217+', to: '217', suffix: '+', alt: 'Plugins', href: href('/plugins/') },
-                  { src: 'card-4.webp', num: '129+', to: '129', suffix: '+', alt: 'Design Systems', href: href('/plugins/systems/') },
-                  { src: 'card-5.webp', num: '21', to: '21', suffix: '', alt: tt('Coding Agent 支持', 'Coding Agents'), href: REPO },
+                  // index.astro); their build-time values come from GitHub and
+                  // stay visible if the browser API request is rate-limited.
+                  // Catalog-backed cards count up from 0.
+                  { src: 'card-1.webp', num: github.starsLabel, to: null, suffix: '', alt: 'GitHub Stars', href: REPO, live: 'stars' as const },
+                  { src: 'card-2.webp', num: String(github.contributorsCount), to: null, suffix: '', alt: tt('贡献者', 'Contributors'), href: `${REPO}/graphs/contributors`, live: 'contributors' as const },
+                  { src: 'card-3.webp', num: pluginsCardNum, to: pluginsCardTo, suffix: '+', alt: 'Plugins', href: href('/plugins/') },
+                  { src: 'card-4.webp', num: systemsCardNum, to: systemsCardTo, suffix: '+', alt: 'Design Systems', href: href('/plugins/systems/') },
+                  { src: 'card-5.webp', num: '21', to: '21', suffix: '', alt: tt('Coding Agent 支持', 'Coding Agents'), href: href('/agents/') },
                   { src: 'card-6.webp', num: null, to: null, suffix: '', alt: 'Star us', href: REPO, cta: true },
                 ] as ReadonlyArray<{ src: string; num: string | null; to: string | null; suffix: string; alt: string; href: string; live?: 'stars' | 'contributors'; cta?: boolean }>).map((item, index) => (
                   <a
@@ -920,7 +1190,7 @@ export default function Page({
                         <span data-github-stars>{item.num}</span>
                       ) : item.live === 'contributors' ? (
                         <span data-github-contributors>{item.num}</span>
-                      ) : item.num ? (
+                      ) : item.num && item.to ? (
                         <span
                           data-countup
                           data-countup-to={item.to}
@@ -928,8 +1198,10 @@ export default function Page({
                         >
                           {item.num}
                         </span>
+                      ) : item.num ? (
+                        <span>{item.num}</span>
                       ) : null}
-                      <em>{item.alt}</em>
+                      {item.num ? ' ' : ''}<em>{item.alt}</em>
                     </h3>
                   </a>
                 ))}
@@ -943,8 +1215,8 @@ export default function Page({
             JSON-LD, so the visible answers match the structured data. */}
         <section className='cta' id='contact' data-od-id='cta'>
           <div className='container'>
-            <div className='cta-dance'>
-              {/* Open Design Home window floating over the mural — sits above the
+            <div className='cta-dance' data-precise-bg>
+              {/* OpenDesign Home window floating over the mural — sits above the
                   painting (::before) but below the CTA copy. Bottom is clipped by
                   the block's overflow:hidden, matching the reference comp.
                   `data-reveal` slides it up from below when the module enters view
@@ -952,10 +1224,11 @@ export default function Page({
               <img
                 className='cta-window'
                 src='/cta-window.webp'
-                alt='Open Design 桌面端首页'
+                alt='OpenDesign 桌面端首页'
                 width={2996}
                 height={1870}
                 decoding='async'
+                loading='lazy'
                 data-reveal
               />
               <div className='cta-dance-inner'>
@@ -1031,9 +1304,33 @@ export default function Page({
             <div className='faq-layout'>
               <div className='faq-head' data-reveal>
                 <h2 className='display faq-title-zh'>{t.faqTitle}</h2>
+                {/* High-intent download CTA filling the FAQ left column's blank
+                    space — readers here are evaluating. Platform-aware direct
+                    download (same `data-download-cta` enhancer as hero/CTA);
+                    social proof below to lift conversion. */}
+                <div className='faq-download'>
+                  <a
+                    className='btn btn-primary'
+                    href={href('/download/')}
+                    data-download-cta
+                    data-download-chip-target
+                    data-download-placement='faq'
+                  >
+                    <span className='arrow'>{iconDownload}</span>
+                    {home.hero.download}
+                  </a>
+                  <p className='faq-download-note'>
+                    {cta.downloadProof.split('{stars}').map((part, index) => (
+                      <span key={`${part}-${index}`}>
+                        {index > 0 ? <span data-github-stars>{github.starsLabel}</span> : null}
+                        {part}
+                      </span>
+                    ))}
+                  </p>
+                </div>
               </div>
               <ol className='faq-list'>
-                {faq.map(({ q, a }, idx) => (
+                {faq.map(({ q, a, href: faqHref }, idx) => (
                   <li className='faq-item' key={q} data-reveal>
                     <details>
                       <summary>
@@ -1046,6 +1343,11 @@ export default function Page({
                         </span>
                       </summary>
                       <p className='faq-a'>{a}</p>
+                      {faqHref ? (
+                        <p className='faq-more'>
+                          <a href={href(faqHref)}>{cta.learnMore}</a>
+                        </p>
+                      ) : null}
                     </details>
                   </li>
                 ))}
@@ -1061,9 +1363,11 @@ export default function Page({
               <div className='sub-footer-col'>
                 <h5>{menu.product}</h5>
                 <ul>
-                  <li><a href={href('/')}>Open Design</a></li>
+                  <li><a href={href('/')}>OpenDesign</a></li>
                   <li><a href={href('/html-anything/')}>{ui.footer.htmlAnything}</a></li>
                   <li><a href={href('/html-video/')}>{ui.footer.htmlVideo}</a></li>
+                  <li><a href={href('/codex-slides/')}>Codex Slides</a></li>
+                  <li><a href={href('/codex-plugin/')}>Codex Plugin</a></li>
                 </ul>
               </div>
 
@@ -1126,6 +1430,7 @@ export default function Page({
                 <h5>{footL.company}</h5>
                 <ul>
                   <li><a href={href('/about/')}>{footL.about}</a></li>
+                  <li><a href={href('/careers/')}>{footL.careers}</a></li>
                   <li><a href={href('/faq/')}>{footL.faq}</a></li>
                   <li><a href={href('/privacy/')}>{footL.privacy}</a></li>
                   <li><a href={href('/terms/')}>{footL.terms}</a></li>
@@ -1142,6 +1447,39 @@ export default function Page({
                 <span className='foot-dot' aria-hidden='true'>·</span>
                 <a href={href('/terms/')}>{footL.terms}</a>
               </div>
+              {/* Language switcher — lives in the footer (not the header) so
+                  the fixed bar stays minimal. Same `[data-locale-switch]`
+                  contract as before: locale-switcher-script.astro binds it. */}
+              <details className='locale-switch foot-locale' data-locale-switch>
+                <summary
+                  className='locale-trigger locale-trigger-iconic foot-locale-trigger'
+                  aria-label={commonCopy.topbar.languageSwitcherLabel}
+                  title={commonCopy.topbar.languageSwitcherLabel}
+                >
+                  <span className='locale-trigger-icon' aria-hidden='true' />
+                  <span className='foot-locale-label'>{localeDef.label}</span>
+                  <span className='locale-trigger-caret ri-glyph' aria-hidden='true'>
+                    {'\uEA4E'}
+                  </span>
+                </summary>
+                <div className='locale-menu' role='menu'>
+                  {localeOptions.map((entry) => (
+                    <a
+                      className={`locale-menu-item${entry.code === locale ? ' is-active' : ''}`}
+                      role='menuitem'
+                      data-locale-link
+                      data-locale-code={entry.code}
+                      href={entry.href}
+                      lang={entry.htmlLang}
+                      aria-current={entry.code === locale ? 'true' : undefined}
+                      key={entry.code}
+                    >
+                      <span className='locale-menu-code'>{entry.code.toUpperCase()}</span>
+                      <span className='locale-menu-label'>{entry.label}</span>
+                    </a>
+                  ))}
+                </div>
+              </details>
               <div className='foot-social'>
                 <a href={X_TWITTER} target='_blank' rel='noopener' aria-label='X'>
                   <svg viewBox='0 0 24 24' width='18' height='18' fill='currentColor' aria-hidden='true'><path d='M18.244 2.25h3.308l-7.227 8.26 8.502 11.24h-6.65l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25h6.815l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77z' /></svg>
@@ -1162,7 +1500,7 @@ export default function Page({
                 in globals.css cover both footers. */}
             <div className='foot-masthead' data-od-id='footer-masthead'>
               <p className='foot-masthead-wordmark'>
-                Open <span className='foot-masthead-accent'>Design</span><span className='foot-masthead-period'>.</span>
+                Open<span className='foot-masthead-accent'>Design</span><span className='foot-masthead-period'>.</span>
               </p>
             </div>
           </div>

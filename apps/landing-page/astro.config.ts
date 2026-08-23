@@ -149,13 +149,21 @@ const changefreq = {
 // Read blog post dates at config time so the sitemap can include lastmod.
 const blogDir = join(import.meta.dirname, 'app/content/blog');
 const blogDates = new Map<string, string>();
+// Posts frontmatter-flagged `noindex: true` emit `noindex, follow` on every
+// variant, English included (see the docblock in app/content.config.ts). A
+// sitemap must not advertise noindexed URLs, so their English entries are
+// dropped from the sitemap filter below.
+const noindexBlogPaths = new Set<string>();
 for (const file of readdirSync(blogDir)) {
   if (!file.endsWith('.md') || file.startsWith('_')) continue;
   const raw = readFileSync(join(blogDir, file), 'utf-8');
+  const slug = file.replace(/\.md$/, '');
   const match = raw.match(/^date:\s*(\d{4}-\d{2}-\d{2})/m);
   if (match) {
-    const slug = file.replace(/\.md$/, '');
     blogDates.set(`/blog/${slug}/`, match[1]!);
+  }
+  if (/^noindex:\s*true\b/m.test(raw)) {
+    noindexBlogPaths.add(`/blog/${slug}/`);
   }
 }
 
@@ -165,6 +173,9 @@ export default defineConfig({
   srcDir: './app',
   outDir: './out',
   trailingSlash: 'always',
+  // The Astro audit toolbar observes the live countdown and re-audits every
+  // image on each tick, creating a dev-only asset request storm.
+  devToolbar: { enabled: false },
   vite: {
     define: {
       // Staging / PR-preview builds set OD_LANDING_NOINDEX=1. SeoHead reads
@@ -250,6 +261,18 @@ export default defineConfig({
       filter: (page) => {
         if (page.includes('/og/')) return false;
         const path = new URL(page).pathname;
+        // Legacy catalog routes (/skills, /systems, /templates) now live
+        // under /plugins/* and are 301-redirected by `public/_redirects`,
+        // and legacy region-cased locale codes (zh-CN, zh-TW, es-ES, pt-BR)
+        // 301 to their canonical lowercase locale (/zh/, /es/). Their old
+        // page routes still build, so without this guard `@astrojs/sitemap`
+        // lists ~460 redirecting URLs. A sitemap must carry only final 200
+        // canonical URLs — never redirects — so drop these legacy prefixes.
+        if (/^\/(skills|systems|templates)\//.test(path)) return false;
+        if (/^\/(zh-CN|zh-TW|es-ES|pt-BR)\//.test(path)) return false;
+        // Blog posts flagged `noindex: true` — the sitemap must not carry
+        // URLs whose pages emit a robots noindex.
+        if (noindexBlogPaths.has(path)) return false;
         const localeMatch = path.match(/^\/([a-z]{2}(?:-[a-z]{2})?)\//);
         if (localeMatch) {
           const code = localeMatch[1];
@@ -286,11 +309,15 @@ export default defineConfig({
           item.priority = 0.9;
           item.changefreq = changefreq.weekly;
         } else if (
-          path === '/skills/' ||
-          path === '/systems/' ||
-          path === '/templates/' ||
           path === '/craft/' ||
-          path === '/plugins/'
+          path === '/plugins/' ||
+          // Canonical section hubs that the legacy /skills, /systems, and
+          // /templates roots now 301 to — keep them on the elevated catalog
+          // crawl hint (0.7 / weekly) rather than letting them fall through
+          // to the generic 0.5 / monthly default.
+          path === '/plugins/skills/' ||
+          path === '/plugins/systems/' ||
+          path === '/plugins/templates/'
         ) {
           item.priority = 0.7;
           item.changefreq = changefreq.weekly;

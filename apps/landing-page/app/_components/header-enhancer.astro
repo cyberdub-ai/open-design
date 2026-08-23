@@ -1,4 +1,15 @@
-<script is:inline>
+---
+import { getLatestRelease } from '../_lib/github';
+
+const latestRelease = await getLatestRelease();
+const directAssets = {
+  macArm64: latestRelease.matrix.macArm64Dmg?.url ?? '',
+  macX64: latestRelease.matrix.macX64Dmg?.url ?? '',
+  windows: latestRelease.matrix.winSetup?.url ?? '',
+};
+---
+
+<script is:inline define:vars={{ directAssets }}>
   (() => {
     const REPO_API = 'https://api.github.com/repos/nexu-io/open-design';
 
@@ -22,6 +33,66 @@
       return fromName(release?.name) ?? fromTag(release?.tag_name) ?? null;
     };
 
+    // The shared nav CTA downloads the newest installer for the visitor's
+    // desktop platform. Build-time stable-release URLs close the first-click
+    // window; the live GitHub refresh below keeps long-lived builds current.
+    // Mobile and unknown platforms retain the localized /download/ fallback.
+    const navDownload = document.querySelector(
+      '[data-direct-download][data-download-placement="nav"]',
+    );
+    const detectNavDownloadPlatform = () => {
+      const ua = (navigator.userAgent || '').toLowerCase();
+      const platform = (
+        navigator.userAgentData?.platform ||
+        navigator.platform ||
+        ''
+      ).toLowerCase();
+      const isIpadOS = navigator.maxTouchPoints > 1 && /mac/.test(platform);
+      if (isIpadOS || /iphone|ipad|ipod|android|mobile/.test(ua)) return null;
+      if (/win/.test(platform) || /windows/.test(ua)) {
+        return {
+          assetKey: 'windows',
+          label: 'Windows',
+          match: (name) => /win.*setup\.exe$/i.test(name),
+        };
+      }
+      if (/mac/.test(platform) || /mac os x/.test(ua)) {
+        let intel = false;
+        try {
+          const gl = document.createElement('canvas').getContext('webgl');
+          const debugInfo = gl && gl.getExtension('WEBGL_debug_renderer_info');
+          const renderer = debugInfo
+            ? String(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL))
+            : '';
+          intel = /intel|radeon|amd/i.test(renderer) && !/apple/i.test(renderer);
+        } catch (error) {}
+        return intel
+          ? {
+              assetKey: 'macX64',
+              label: 'macOS (Intel)',
+              match: (name) => /mac-x64\.dmg$/i.test(name),
+            }
+          : {
+              assetKey: 'macArm64',
+              label: 'macOS (Apple Silicon)',
+              match: (name) => /mac-arm64\.dmg$/i.test(name),
+            };
+      }
+      // No Linux desktop build — Linux visitors keep the /download/
+      // page fallback.
+      return null;
+    };
+    const navPlatform = navDownload ? detectNavDownloadPlatform() : null;
+    const applyNavDownloadAsset = (url) => {
+      if (!navDownload || typeof url !== 'string' || !url) return;
+      navDownload.href = url;
+      navDownload.setAttribute('download', '');
+      navDownload.setAttribute('data-download-platform-label', navPlatform.label);
+      navDownload.removeAttribute('target');
+      navDownload.removeAttribute('rel');
+    };
+    if (navPlatform) applyNavDownloadAsset(directAssets[navPlatform.assetKey]);
+
     const chrome = document.querySelector('[data-chrome-headroom]');
     if (chrome) {
       const navBar = chrome.querySelector('.nav');
@@ -42,11 +113,17 @@
         const blur = 11;
         const blend = 'difference';
         const inset = Math.min(w, h) * (borderRatio * 0.5);
+        // Gradient stops are opaque black (#000), NOT transparent (#0000): a
+        // transparent->red stop interpolates with straight alpha, so composited
+        // over black the R channel comes out quadratic (255*t^2) — its 0.5
+        // neutral point lands at ~29% instead of 50%, which shifts the
+        // refraction off to one side. Opaque stops give a linear ramp whose
+        // neutral point is centered, so the caustics stay symmetric.
         const svg =
           '<svg viewBox="0 0 ' + w + ' ' + h + '" xmlns="http://www.w3.org/2000/svg">' +
             '<defs>' +
-              '<linearGradient id="red" x1="100%" y1="0%" x2="0%" y2="0%"><stop offset="0%" stop-color="#0000"/><stop offset="100%" stop-color="red"/></linearGradient>' +
-              '<linearGradient id="blue" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#0000"/><stop offset="100%" stop-color="blue"/></linearGradient>' +
+              '<linearGradient id="red" x1="100%" y1="0%" x2="0%" y2="0%"><stop offset="0%" stop-color="#000"/><stop offset="100%" stop-color="red"/></linearGradient>' +
+              '<linearGradient id="blue" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#000"/><stop offset="100%" stop-color="blue"/></linearGradient>' +
             '</defs>' +
             '<rect x="0" y="0" width="' + w + '" height="' + h + '" fill="black"/>' +
             '<rect x="0" y="0" width="' + w + '" height="' + h + '" rx="' + radius + '" fill="url(#red)"/>' +
@@ -118,7 +195,7 @@
     }
 
     // Hamburger menu toggle. Active only at narrow viewports (CSS hides
-    // the toggle button at ≥1100px). Click toggles `.is-open` on the
+    // the toggle button at ≥1367px). Click toggles `.is-open` on the
     // header; outside-click, Escape, and clicking any link inside the
     // menu close it again. Keeps `aria-expanded` in sync.
     const toggle = document.querySelector('[data-nav-toggle]');
@@ -133,9 +210,10 @@
         ev.stopPropagation();
         setOpen(!navEl.classList.contains('is-open'));
       });
-      // Close when clicking any actual nav link (but not the Product
-      // parent trigger — its href='/' is a real page link, so we let it
-      // navigate which closes the menu naturally).
+      // Close when clicking any actual nav link. The Product and Resources
+      // parent triggers are <button>s (category labels that only open their
+      // dropdown), not <a>s, so they are naturally excluded here and never
+      // close the mobile menu on tap.
       primaryNav.querySelectorAll('a').forEach((link) => {
         link.addEventListener('click', () => setOpen(false));
       });
@@ -146,6 +224,14 @@
         if (ev.key === 'Escape') setOpen(false);
       });
     }
+
+    // Product and Resources are category labels (not pages): they render as
+    // <button class="nav-trigger"> so they never navigate (Product used to
+    // bounce to the homepage, Resources to /blog/), and their dropdown is
+    // revealed by the SAME pure-CSS :hover / :focus-within rule as the hub
+    // menus — no JS, so it works on first paint / with JS disabled, and on
+    // touch (tapping the button focuses it → :focus-within reveals the menu).
+    // No JS enhancement is needed here.
 
     const starSlots = document.querySelectorAll('[data-github-stars]');
     if (starSlots.length > 0) {
@@ -162,17 +248,130 @@
     }
 
     const versionSlots = document.querySelectorAll('[data-github-version]');
-    if (versionSlots.length > 0) {
+    const downloadPrompt = document.querySelector('[data-download-engagement-prompt]');
+    const navNeedsLiveRefresh = navPlatform && !downloadPrompt;
+    if (versionSlots.length > 0 || navNeedsLiveRefresh) {
       fetch(`${REPO_API}/releases/latest`, {
         headers: { Accept: 'application/vnd.github+json' },
       })
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error('http error'))))
         .then((data) => {
           const label = formatVersion(data);
-          if (!label) return;
-          for (const slot of versionSlots) slot.textContent = label;
+          if (label) {
+            for (const slot of versionSlots) slot.textContent = label;
+          }
+          if (navPlatform && Array.isArray(data?.assets)) {
+            const asset = data.assets.find(
+              (entry) =>
+                entry &&
+                typeof entry.name === 'string' &&
+                typeof entry.browser_download_url === 'string' &&
+                navPlatform.match(entry.name),
+            );
+            if (asset) applyNavDownloadAsset(asset.browser_download_url);
+          }
         })
         .catch(() => {});
+    }
+
+    // OpenDesign Cloud header account. Detects an existing cloud session via
+    // the vela API and reveals the avatar menu only for signed-in visitors.
+    // Signed-out visitors keep the download CTA as the sole account-side
+    // action, because the product itself runs in the desktop client. All
+    // endpoints/URLs arrive as `data-*` on `[data-amr-account]` (header.tsx)
+    // since this inline script is not processed by Vite. Every network path
+    // fails closed to the signed-out state.
+    const account = document.querySelector('[data-amr-account]');
+    if (account) {
+      const api = (account.getAttribute('data-amr-api') || '').replace(/\/$/, '');
+      const menuEl = account.querySelector('[data-amr-menu]');
+      const avatarImg = account.querySelector('[data-amr-avatar]');
+      const avatarFallback = account.querySelector('[data-amr-avatar-fallback]');
+      const nameEl = account.querySelector('[data-amr-name]');
+      const emailEl = account.querySelector('[data-amr-email]');
+      const signoutBtn = account.querySelector('[data-amr-signout]');
+
+      const sessionUrl = api + '/api/auth/get-session';
+      const signoutUrl = api + '/api/auth/sign-out';
+
+      // Cloud account funnel analytics — feeds the same PostHog sink as
+      // the rest of the site (window.__odTrack, guarded). area is always the
+      // header since this module only lives in the nav chrome.
+      const track = (name, extra) => {
+        try {
+          if (typeof window.__odTrack === 'function') {
+            window.__odTrack(
+              name,
+              Object.assign(
+                { area: 'header', locale: (document.documentElement.getAttribute('lang') || 'en').toLowerCase() },
+                extra || {},
+              ),
+            );
+          }
+        } catch (e) {}
+      };
+
+      const fetchSession = () =>
+        fetch(sessionUrl, {
+          credentials: 'include',
+          headers: { Accept: 'application/json' },
+        })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((data) => (data && data.user ? data.user : null))
+          .catch(() => null);
+
+      const initials = (user) => {
+        const base = (user.name || user.email || '').trim();
+        return base ? base[0].toUpperCase() : '·';
+      };
+
+      const showSignedIn = (user) => {
+        if (nameEl) nameEl.textContent = user.name || '';
+        if (emailEl) emailEl.textContent = user.email || '';
+        if (avatarImg && user.image) {
+          avatarImg.setAttribute('src', user.image);
+          avatarImg.removeAttribute('hidden');
+          if (avatarFallback) avatarFallback.setAttribute('hidden', '');
+        } else {
+          if (avatarImg) avatarImg.setAttribute('hidden', '');
+          if (avatarFallback) {
+            avatarFallback.textContent = initials(user);
+            avatarFallback.removeAttribute('hidden');
+          }
+        }
+        if (menuEl) menuEl.removeAttribute('hidden');
+      };
+
+      const showSignedOut = () => {
+        if (menuEl) {
+          menuEl.setAttribute('hidden', '');
+          menuEl.removeAttribute('open');
+        }
+      };
+
+      // Initial silent probe for an existing session.
+      fetchSession().then((user) => {
+        if (user) showSignedIn(user);
+        else showSignedOut();
+      });
+
+      if (signoutBtn) {
+        signoutBtn.addEventListener('click', () => {
+          track('sign_out_click', {});
+          fetch(signoutUrl, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { Accept: 'application/json' },
+          })
+            .catch(() => {})
+            .then(() => showSignedOut());
+        });
+      }
+
+      const consoleLink = account.querySelector('[data-amr-console-link]');
+      if (consoleLink) {
+        consoleLink.addEventListener('click', () => track('cloud_console_open', { source: 'header_menu' }));
+      }
     }
 
     // Helper used by every clipboard-write button (link copy, share

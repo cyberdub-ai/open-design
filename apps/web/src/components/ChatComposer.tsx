@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,7 +13,7 @@ import {
 } from "react";
 import { createPortal } from 'react-dom';
 import { Button } from '@open-design/components';
-import { useI18n, useT } from '../i18n';
+import { useI18n } from '../i18n';
 import { localizePluginDescription, localizePluginTitle } from './plugins-home/localization';
 import type { Dict, Locale } from '../i18n/types';
 import {
@@ -24,18 +25,25 @@ import {
   trackChatPanelClick,
   trackComposerBarClick,
   trackComposerSessionModeClick,
+  trackContextLinkResult,
   trackDesignToolboxClick,
+  trackFigmaHelpModalSurfaceView,
   trackFileUploadResult,
+  trackProjectReferenceModalSurfaceView,
 } from '../analytics/events';
-import { sessionModeToTracking } from '@open-design/contracts/analytics';
 import type {
   ComposerBarClickProps,
   DesignToolboxClickProps,
 } from '@open-design/contracts/analytics';
+import { sessionModeToTracking } from '@open-design/contracts/analytics';
 import { deriveUploadCohort } from '../analytics/upload-tracking';
-import { projectRawUrl, uploadProjectFiles, openFolderDialog, fetchRecentLinkedDirs, pushRecentLinkedDir, dirExists } from "../providers/registry";
-import { WorkingDirPicker } from './WorkingDirPicker';
-import { patchProject } from "../state/projects";
+import { notifyCompletionFeedbackGesture } from '../utils/notifications';
+import { projectRawUrl, uploadProjectFiles, openFolderDialog, fetchRecentLinkedDirs, pushRecentLinkedDir, dirExists, applyLibraryAsset, fetchLibraryAssetElementHtml } from "../providers/registry";
+import {
+  duplicatePluginAsProject,
+  patchProject,
+} from "../state/projects";
+import { navigate } from '../router';
 import { fetchMcpServers } from "../state/mcp";
 import type { McpServerConfig, McpTemplate } from "../state/mcp";
 import { listPlugins } from "../state/projects";
@@ -50,12 +58,22 @@ import type {
   PluginSourceKind,
   ResearchOptions,
   RunContextSelection,
+  WorkspaceCollabContext,
   WorkspaceContextItem,
 } from '@open-design/contracts';
 import { buildVisualAnnotationAttachment, commentTargetDisplayName } from '../comments';
 import { Icon, type IconName } from "./Icon";
-import { SessionModeToggle } from './SessionModeToggle';
-import { ComposerPlusMenu } from './ComposerPlusMenu';
+import { ComposerPlusMenu, PLUS_SUBMENU_RESOURCE_KIND, type PlusMenuSubmenu } from './ComposerPlusMenu';
+import { LibraryPicker } from './LibraryPicker';
+import { FigmaImportModal } from './FigmaImportModal';
+import { FigmaHelpModal } from './FigmaHelpModal';
+import {
+  ProjectReferenceModal,
+  type ProjectReferenceSelection,
+} from './ProjectReferenceModal';
+import { assetTitle, elementMetaOf } from './LibraryAssetMeta';
+import { ComposerModePicker } from './ComposerModePicker';
+import type { LibraryAsset, LibraryElementMeta } from '@open-design/contracts';
 import {
   DESIGN_TOOLBOX_ACTIONS,
   designToolboxActionBadge,
@@ -71,6 +89,7 @@ import {
 import { ComposerPluginPreview } from './ComposerPluginPreview';
 import { computeToolboxDetailPosition } from './composer-detail-position';
 import { PluginDetailsModal } from "./PluginDetailsModal";
+import { SkillDetailsModal } from './SkillDetailsModal';
 import { PluginsSection, type PluginsSectionHandle } from "./PluginsSection";
 import { BUILT_IN_PETS, CUSTOM_PET_ID } from "./pet/pets";
 import {
@@ -78,6 +97,8 @@ import {
   mentionTokenPresent,
   type InlineMentionEntity,
 } from '../utils/inlineMentions';
+import { workspaceContextLinkedDir, workspaceContextLinkedDirs } from './workspace-context';
+import { useProjectCollabContext } from '../collab/collab-context';
 import {
   LexicalComposerInput,
   type LexicalComposerInputHandle,
@@ -85,11 +106,58 @@ import {
 } from './composer/LexicalComposerInput';
 import { CaretFloatingLayer } from './composer/CaretFloatingLayer';
 import { ANNOTATION_EVENT, type AnnotationEventDetail } from "./PreviewDrawOverlay";
+
+/**
+ * Window event for staging attachments that are ALREADY uploaded to the
+ * project (ChatAttachment shape, not File). Mirrors ANNOTATION_EVENT's
+ * pattern; used by surfaces that materialize files themselves — e.g. the
+ * design browser's hover "添加到对话" capture, which writes the PNG via
+ * writeProjectBase64File before notifying the composer.
+ */
+export const STAGE_ATTACHMENT_EVENT = 'opendesign:stage-attachment';
+export interface StageAttachmentEventDetail {
+  attachments: ChatAttachment[];
+}
 import { DesignSystemSwitchPicker } from "./DesignSystemSwitchPicker";
 import { listenForConnectorsChanged } from './connectors-events';
 import { fetchConnectorCatalogSnapshot } from './connectors-state';
+import { PlaceholderCarousel } from './home-hero/PlaceholderCarousel';
+import type { PlaceholderScenario } from './home-hero/placeholderScenarios';
 
 type TranslateFn = (key: keyof Dict, vars?: Record<string, string | number>) => string;
+
+interface TrackedWorkspaceLinkedDir {
+  dir: string;
+  previousLinkedDirs: string[];
+}
+
+function dedupeWorkspaceContextItems(items: WorkspaceContextItem[]): WorkspaceContextItem[] {
+  const out: WorkspaceContextItem[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const key = `${item.kind}:${item.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function trackedWorkspaceLinkedDirsForContexts(
+  items: WorkspaceContextItem[],
+  linkedDirs: string[],
+): Record<string, TrackedWorkspaceLinkedDir> {
+  const out: Record<string, TrackedWorkspaceLinkedDir> = {};
+  for (const item of items) {
+    const dir = workspaceContextLinkedDir(item) ?? '';
+    if (!dir || !linkedDirs.includes(dir)) continue;
+    out[item.id] = {
+      dir,
+      previousLinkedDirs: linkedDirs.filter((linkedDir) => linkedDir !== dir),
+    };
+  }
+  return out;
+}
 
 type ToolsTab = 'plugins' | 'skills' | 'mcp' | 'import';
 
@@ -157,6 +225,8 @@ type DesignToolboxResource =
   | (DesignToolboxResourceBase & { kind: 'connector'; connector: ConnectorDetail })
   | (DesignToolboxResourceBase & { kind: 'file'; file: ProjectFile });
 
+export type ChatSendOutcome = void | 'restore-draft';
+
 interface Props {
   projectId: string | null;
   projectFiles: ProjectFile[];
@@ -165,7 +235,13 @@ interface Props {
   sessionMode?: ChatSessionMode;
   onSessionModeChange?: (mode: ChatSessionMode) => void;
   sendDisabled?: boolean;
+  // Read-only viewer of a team-shared project: makes the Lexical editor
+  // non-editable (in addition to `sendDisabled` blocking the send action) so
+  // the user cannot type into the composer at all.
+  inputDisabled?: boolean;
   initialDraft?: string;
+  composerPlaceholder?: string;
+  placeholderScenarios?: ReadonlyArray<PlaceholderScenario>;
   draftStorageKey?: string;
   // Lazy ensure — the composer calls this before its first upload, so the
   // project folder exists on disk before files land in it. Returns the
@@ -184,7 +260,7 @@ interface Props {
     attachments: ChatAttachment[],
     commentAttachments: ChatCommentAttachment[],
     meta?: ChatSendMeta,
-  ) => void;
+  ) => ChatSendOutcome | Promise<ChatSendOutcome>;
   onStop: () => void;
   // Opens the global settings dialog (CLI / model / agent picker). The
   // composer's leading gear icon routes here so users can switch models
@@ -198,6 +274,10 @@ interface Props {
   // ChatPane → ProjectView → App. Omitted → the add rows are hidden.
   onBrowsePlugins?: () => void;
   onOpenConnectors?: () => void;
+  /** Reports which standalone quick-pill popover is open (null when none), so
+   *  the host that renders the pills can carry `aria-expanded` on them. The
+   *  popovers live here but their triggers do not. */
+  onStandalonePanelChange?: (panel: ComposerStandalonePanel) => void;
   // Optional pet wiring. The composer no longer renders a visible pet
   // entry, but existing manual `/pet` commands still route here.
   petConfig?: AppConfig['pet'];
@@ -206,8 +286,14 @@ interface Props {
   onOpenPetSettings?: () => void;
   researchAvailable?: boolean;
   projectMetadata?: ProjectMetadata;
-  onProjectMetadataChange?: (metadata: ProjectMetadata) => void;
+  // Fired after the daemon accepts a metadata PATCH, with the authoritative
+  // post-patch project (fresh `updatedAt` included). Callers must replace
+  // their whole project copy with it: forwarding only the metadata onto a
+  // stale copy lets an older detail snapshot win recency comparisons and
+  // shadow the change (e.g. the working-dir label never updating).
+  onProjectMetadataChange?: (updated: Project) => void;
   activeWorkspaceContext?: WorkspaceContextItem | null;
+  initialWorkspaceContexts?: WorkspaceContextItem[];
   workspaceContexts?: WorkspaceContextItem[];
   // BYOK image-model picker shown above the textarea for protocols that
   // inject the daemon-side generate_image tool (SenseAudio, AIHubMix).
@@ -261,8 +347,16 @@ interface Props {
 
 // Imperative handle so ancestors (e.g. example chips in ChatPane) can
 // push text into the composer without owning its draft state.
+export interface ChatComposerDraftOptions {
+  entryFrom?: ChatAnalyticsEntryFrom;
+  sessionMode?: ChatSessionMode;
+}
+
+/** Which of the two standalone quick-pill popovers is open, if either. */
+export type ComposerStandalonePanel = 'plugins' | 'toolbox' | null;
+
 export interface ChatComposerHandle {
-  setDraft: (text: string) => void;
+  setDraft: (text: string, options?: ChatComposerDraftOptions) => void;
   restoreDraft: (draft: {
     text: string;
     attachments?: ChatAttachment[];
@@ -290,11 +384,29 @@ export interface ChatComposerHandle {
    * an unknown id.
    */
   applyDesignToolboxSkill: (skillId: string) => void;
-  /** Legacy: open the standalone toolbox popover. Currently unused by callers. */
-  openDesignToolbox: () => void;
+  /** Open the standalone toolbox popover (the 设计百宝箱 quick pill above the
+   *  composer input; the "+" menu no longer carries a toolbox row). `opener` is
+   *  the control focus returns to when the popover is dismissed. */
+  openDesignToolbox: (opener?: HTMLElement | null) => void;
+  /** Open the standalone plugins popover (the 插件 quick pill above the
+   *  composer input; the "+" menu no longer carries a plugins row). `opener` is
+   *  the control focus returns to when the popover is dismissed. */
+  openPluginsPanel: (opener?: HTMLElement | null) => void;
+  /** Schedule closing whichever standalone popover is open (hover-leave from
+   *  a quick pill); re-opening or hovering the popup cancels it. */
+  scheduleComposerPanelClose: () => void;
+  /**
+   * Open the composer "+" menu from outside, optionally landing on a specific
+   * flyout.
+   */
+  openPlusMenu: (submenu?: PlusMenuSubmenu) => void;
 }
 
 export interface ChatSendMeta {
+  /** Stable identity for one confirmed user submission. Queueing and the
+   *  eventual daemon run reuse it so retries of the same UI action are
+   *  idempotent without collapsing separate sends that share the same text. */
+  clientRequestId?: string;
   queueOnly?: boolean;
   research?: ResearchOptions;
   context?: RunContextSelection;
@@ -313,6 +425,8 @@ export interface ChatSendMeta {
    *  this send (e.g. 'mark' when the turn is sent from the Mark draw overlay).
    *  Behavior never depends on it; it only shapes PostHog props. */
   entryFrom?: ChatAnalyticsEntryFrom;
+  /** One-shot run mode override for seeded follow-ups before parent state catches up. */
+  sessionMode?: ChatSessionMode;
 }
 
 /**
@@ -334,7 +448,10 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       sessionMode = 'design',
       onSessionModeChange,
       sendDisabled = false,
+      inputDisabled = false,
       initialDraft,
+      composerPlaceholder,
+      placeholderScenarios = [],
       draftStorageKey,
       onEnsureProject,
       commentAttachments = [],
@@ -344,6 +461,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       onStop,
       onOpenMcpSettings,
       onBrowsePlugins,
+      onStandalonePanelChange,
       onOpenConnectors,
       petConfig,
       onAdoptPet,
@@ -353,6 +471,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       projectMetadata,
       onProjectMetadataChange,
       activeWorkspaceContext = null,
+      initialWorkspaceContexts = [],
       workspaceContexts = [],
       byokApiProtocol,
       byokImageModel,
@@ -369,21 +488,22 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       footerAccessory,
       leadingAccessory,
       designSystemPicker,
-      currentDesignSystemId = null,
-      onActiveDesignSystemChange,
       onShowToast,
     },
     ref
   ) {
-    const t = useT();
+    const { locale, t } = useI18n();
     const analytics = useAnalytics();
+    const { workspaceContext } = useProjectCollabContext();
     const activeFileContext =
       projectMetadata?.importedFrom === 'folder' && activeProjectFileName
         ? activeProjectFileName
         : null;
     const activeFileDisplayName = activeFileContext ? lastPathSegment(activeFileContext) : null;
     const [draft, setDraft] = useState(() => initialDraft ?? loadComposerDraft(draftStorageKey) ?? "");
+    const [placeholderScenario, setPlaceholderScenario] = useState<PlaceholderScenario | null>(null);
     const composerRootRef = useRef<HTMLDivElement | null>(null);
+    const pendingSessionModeRef = useRef<ChatSessionMode | null>(null);
     // Synchronous mirror of `draft`. Event handlers that mutate the draft off
     // a captured render closure (notably the annotation listener, where two
     // uploads can resolve concurrently) read/write this ref so their edits
@@ -391,13 +511,33 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     // by handleEditorChange (the editor is the single source for typing) and by
     // the programmatic-set paths below.
     const draftRef = useRef(draft);
+    // Submission admission can cross asynchronous gates before the composer
+    // is cleared. Keep a synchronous latch so a second Enter/click in that
+    // window cannot enqueue the same still-visible payload again.
+    const composedSendPendingRef = useRef(false);
+    const previousSessionModeRef = useRef(sessionMode);
+
+    useEffect(() => {
+      if (previousSessionModeRef.current === sessionMode) return;
+      if (pendingSessionModeRef.current && pendingSessionModeRef.current !== sessionMode) {
+        pendingSessionModeRef.current = null;
+      }
+      previousSessionModeRef.current = sessionMode;
+    }, [sessionMode]);
 
     // chat_panel page_view fires from ProjectView (which outlives
     // conversation switches) so the event measures real chat-panel
     // entries rather than ChatComposer remounts. See PR #2285 review
     // 2026-05-20 04:08 for the rationale.
     const [staged, setStaged] = useState<ChatAttachment[]>([]);
+    // Manual editor height set by dragging the shell's gray backdrop up/down.
+    // null = the default auto-grow min/max behavior.
+    const [manualEditorHeight, setManualEditorHeight] = useState<number | null>(null);
     const nextAttachmentOrderRef = useRef(0);
+    const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
+    const [figmaModalOpen, setFigmaModalOpen] = useState(false);
+    const [figmaHelpOpen, setFigmaHelpOpen] = useState(false);
+    const [projectReferenceOpen, setProjectReferenceOpen] = useState(false);
     const [stagedVisualComments, setStagedVisualComments] = useState<ChatCommentAttachment[]>([]);
     const streamingAnnotationSendPendingRef = useRef(false);
     // Remembers the entry_from that the deferred streaming send must carry once
@@ -413,9 +553,85 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     // its own cascading skill menu, so nothing opens this anymore; kept compiling
     // behind `openDesignToolbox` until the panel subsystem is removed wholesale.
     const [designToolboxOpen, setDesignToolboxOpen] = useState(false);
+    const [pluginsPanelOpen, setPluginsPanelOpen] = useState(false);
+    // Shared close timer for the two legacy standalone popovers (插件 /
+    // 设计百宝箱).
+    const panelCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    function cancelComposerPanelClose() {
+      if (panelCloseTimerRef.current) {
+        clearTimeout(panelCloseTimerRef.current);
+        panelCloseTimerRef.current = null;
+      }
+    }
+    function scheduleComposerPanelClose() {
+      cancelComposerPanelClose();
+      panelCloseTimerRef.current = setTimeout(() => {
+        panelCloseTimerRef.current = null;
+        setPluginsPanelOpen(false);
+        setDesignToolboxOpen(false);
+      }, 260);
+    }
+    useEffect(() => () => {
+      if (panelCloseTimerRef.current) clearTimeout(panelCloseTimerRef.current);
+    }, []);
+    // The control a standalone popover was opened from. Explicit openers are
+    // preferred, but imperative callers that run synchronously from a click can
+    // omit one: capture the active control before focus moves into the panel.
+    const panelOpenerRef = useRef<HTMLElement | null>(null);
+    function resolveStandalonePanelOpener(opener?: HTMLElement | null): HTMLElement | null {
+      if (opener) return opener;
+      const activeElement = document.activeElement;
+      return activeElement instanceof HTMLElement && activeElement !== document.body
+        ? activeElement
+        : null;
+    }
+    /** Close whichever standalone popover is open BECAUSE THE USER DISMISSED IT
+     *  (Escape, backdrop) and return focus to the control that opened it. Paths
+     *  where the user picked something keep the plain setters: the composer
+     *  takes focus there, and pulling it back to the opener would fight that. */
+    function dismissStandalonePanels() {
+      cancelComposerPanelClose();
+      setPluginsPanelOpen(false);
+      setDesignToolboxOpen(false);
+      const opener = panelOpenerRef.current;
+      panelOpenerRef.current = null;
+      opener?.focus();
+    }
+    const openStandalonePanel: ComposerStandalonePanel = designToolboxOpen
+      ? 'toolbox'
+      : pluginsPanelOpen
+        ? 'plugins'
+        : null;
+    useEffect(() => {
+      onStandalonePanelChange?.(openStandalonePanel);
+    }, [onStandalonePanelChange, openStandalonePanel]);
+    // Escape closes the popover, matching ComposerPlusMenu's own document-level
+    // handler. Without it, Escape pressed while focus sat in the plugin search
+    // did nothing at all.
+    useEffect(() => {
+      if (openStandalonePanel == null) return;
+      function onKey(event: KeyboardEvent) {
+        if (event.key !== 'Escape') return;
+        dismissStandalonePanels();
+      }
+      document.addEventListener('keydown', onKey);
+      return () => document.removeEventListener('keydown', onKey);
+    }, [openStandalonePanel]);
+    // External "+"-menu open request — nonce-keyed so every request re-opens
+    // even after the menu was dismissed.
+    const [plusMenuOpenRequest, setPlusMenuOpenRequest] = useState<
+      { nonce: number; submenu?: PlusMenuSubmenu } | null
+    >(null);
     const [stagedMcpServers, setStagedMcpServers] = useState<McpServerConfig[]>([]);
     const [stagedConnectors, setStagedConnectors] = useState<ConnectorDetail[]>([]);
-    const [stagedWorkspaceContexts, setStagedWorkspaceContexts] = useState<WorkspaceContextItem[]>([]);
+    const linkedDirs = projectMetadata?.linkedDirs ?? [];
+    const [stagedWorkspaceContexts, setStagedWorkspaceContexts] = useState<WorkspaceContextItem[]>(
+      () => dedupeWorkspaceContextItems(initialWorkspaceContexts),
+    );
+    const [workspaceLinkedDirAdds, setWorkspaceLinkedDirAdds] = useState<Record<string, TrackedWorkspaceLinkedDir>>(
+      () => trackedWorkspaceLinkedDirsForContexts(initialWorkspaceContexts, linkedDirs),
+    );
+    const [promotedWorkspaceContextDir, setPromotedWorkspaceContextDir] = useState<string | null>(null);
     const [dismissedWorkspaceContextId, setDismissedWorkspaceContextId] = useState<string | null>(null);
     const activeWorkspaceContextId = activeWorkspaceContext?.id ?? null;
     const previousWorkspaceContextIdRef = useRef<string | null>(activeWorkspaceContextId);
@@ -452,10 +668,30 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     // Detail modal — opened from a context chip click (kind === 'plugin')
     // or from the tools-menu "Details" affordance.
     const [detailsRecord, setDetailsRecord] = useState<InstalledPluginRecord | null>(null);
+    const [detailsSkill, setDetailsSkill] = useState<{
+      id: string;
+      summary?: SkillSummary | null;
+    } | null>(null);
     const [activeAppliedPlugin, setActiveAppliedPlugin] =
       useState<AppliedPluginSnapshot | null>(null);
     const pluginsSectionRef = useRef<PluginsSectionHandle | null>(null);
     const inlineBackedPluginRef = useRef<{ id: string; label: string } | null>(null);
+    async function duplicateDetailsPlugin(record: InstalledPluginRecord) {
+      try {
+        const result = await duplicatePluginAsProject(record.id, {
+          name: localizePluginTitle(locale, record),
+        }, workspaceContext);
+        setDetailsRecord(null);
+        navigate({
+          kind: 'project',
+          projectId: result.projectId,
+          conversationId: result.conversationId,
+          fileName: result.relPath,
+        });
+      } catch {
+        onShowToast?.(t('pluginCard.duplicateFailed'));
+      }
+    }
     // Consolidated "tools" popover — a single dropdown anchored to the
     // leading sliders icon that hosts project context, MCP, Import actions,
     // and a shortcut to open the full Settings dialog. Replaces the previous
@@ -469,6 +705,11 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     const [composerEngaged, setComposerEngaged] = useState(
       () => (draft ?? '').trim().length > 0,
     );
+    // Match HomeHero's empty-editor behavior: once the user places the real
+    // caret in this composer, hide/pause the decorative typewriter overlay so
+    // CSS no longer suppresses the native blinking caret. Blur resumes the
+    // animation only while the composer is still genuinely empty.
+    const [composerFocused, setComposerFocused] = useState(false);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     // The Lexical editor handle — drives text/mention/clear/focus from the
     // host. Replaces the old textareaRef + manual selection plumbing. IME
@@ -486,11 +727,6 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     // wins over this pending value.
     const pendingEntryFromRef = useRef<ChatAnalyticsEntryFrom | null>(null);
     const petEnabled = Boolean(onAdoptPet && onTogglePet);
-    const linkedDirs = projectMetadata?.linkedDirs ?? [];
-    // The project's working directory: the local folder the agent can read
-    // (via `linkedDirs` → `--add-dir`). Shown in the WorkingDirPicker below
-    // the input, mirroring Home. We treat it as a single primary folder.
-    const workingDir = linkedDirs[0] ?? null;
     const [recentDirs, setRecentDirs] = useState<string[]>([]);
     useEffect(() => {
       let cancelled = false;
@@ -506,6 +742,50 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       const persisted = await pushRecentLinkedDir(dir);
       setRecentDirs(persisted);
     }, []);
+    const visibleWorkspaceContext =
+      activeWorkspaceContext && activeWorkspaceContext.id !== dismissedWorkspaceContextId
+        ? activeWorkspaceContext
+        : null;
+    const selectedWorkspaceContexts = useMemo(() => {
+      const out: WorkspaceContextItem[] = [];
+      const seen = new Set<string>();
+      const push = (item: WorkspaceContextItem | null | undefined) => {
+        if (!item) return;
+        const key = `${item.kind}:${item.id}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        out.push(item);
+      };
+      push(visibleWorkspaceContext);
+      for (const item of stagedWorkspaceContexts) push(item);
+      return out;
+    }, [stagedWorkspaceContexts, visibleWorkspaceContext]);
+    const selectedWorkspaceContextDirs = useMemo<string[]>(
+      () => workspaceContextLinkedDirs(selectedWorkspaceContexts),
+      [selectedWorkspaceContexts],
+    );
+    const workspaceContextMetadataLinkedDirList = useMemo<string[]>(
+      () =>
+        Array.from(new Set([
+          ...Object.values(workspaceLinkedDirAdds).map((tracked) => tracked.dir),
+          ...selectedWorkspaceContextDirs,
+        ])),
+      [selectedWorkspaceContextDirs, workspaceLinkedDirAdds],
+    );
+    const workspaceContextLinkedDirList = useMemo<string[]>(
+      () =>
+        workspaceContextMetadataLinkedDirList.filter((dir) => dir !== promotedWorkspaceContextDir),
+      [promotedWorkspaceContextDir, workspaceContextMetadataLinkedDirList],
+    );
+    const workspaceContextLinkedDirSet = useMemo<Set<string>>(
+      () => new Set(workspaceContextLinkedDirList),
+      [workspaceContextLinkedDirList],
+    );
+    // The project's working directory: the local folder the agent can read
+    // (via `linkedDirs` → `--add-dir`). Shown in the WorkingDirPicker below
+    // the input, mirroring Home. Context-only folders are still linked for
+    // agent read access, but they should not become the displayed primary dir.
+    const workingDir = linkedDirs.find((dir) => !workspaceContextLinkedDirSet.has(dir)) ?? null;
     // Live-check whether the selected working directory still exists, so a
     // folder deleted from disk turns the picker red without a page reload.
     // Re-checked when the dir changes, when the window/tab regains focus
@@ -532,24 +812,6 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
         document.removeEventListener('visibilitychange', onVisible);
       };
     }, [checkWorkingDir]);
-    const visibleWorkspaceContext =
-      activeWorkspaceContext && activeWorkspaceContext.id !== dismissedWorkspaceContextId
-        ? activeWorkspaceContext
-        : null;
-    const selectedWorkspaceContexts = useMemo(() => {
-      const out: WorkspaceContextItem[] = [];
-      const seen = new Set<string>();
-      const push = (item: WorkspaceContextItem | null | undefined) => {
-        if (!item) return;
-        const key = `${item.kind}:${item.id}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        out.push(item);
-      };
-      push(visibleWorkspaceContext);
-      for (const item of stagedWorkspaceContexts) push(item);
-      return out;
-    }, [stagedWorkspaceContexts, visibleWorkspaceContext]);
     // initialDraft is only honored on the first non-empty value the parent
     // hands us. After we seed once, the composer is fully under user control
     // — re-renders that pass the same prompt back must not reseed. If the
@@ -577,6 +839,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       if (previousWorkspaceContextIdRef.current === activeWorkspaceContextId) return;
       previousWorkspaceContextIdRef.current = activeWorkspaceContextId;
       setDismissedWorkspaceContextId(null);
+      setPromotedWorkspaceContextDir(null);
     }, [activeWorkspaceContextId]);
 
     // Latch `composerEngaged` true on the first real interaction so the
@@ -712,9 +975,9 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
           plugins: pluginsForComposer,
           skills,
           staged,
-          workspaceContexts,
+          workspaceContexts: selectedWorkspaceContexts,
         }),
-      [connectors, enabledMcpServers, pluginsForComposer, projectFiles, skills, staged, workspaceContexts],
+      [connectors, enabledMcpServers, pluginsForComposer, projectFiles, selectedWorkspaceContexts, skills, staged],
     );
     // Resolve which tabs to surface in the consolidated tools popover.
     // Plugins is always visible while a project is active so users can
@@ -735,7 +998,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
           id: 'mcp',
           label: '/mcp',
           insert: '/mcp ',
-          descKey: 'pet.slashPet',
+          descKey: 'pet.slashMcp',
           icon: 'sliders',
           argHint: 'open settings · <server-id> to insert hint',
         });
@@ -745,7 +1008,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
           id: `mcp-${s.id}`,
           label: `/mcp ${s.id}`,
           insert: `Use the \`${s.id}\` MCP server tools. `,
-          descKey: 'pet.slashPet',
+          descKey: 'pet.slashMcp',
           icon: 'sparkles',
           argHint: s.label || s.transport,
         });
@@ -889,7 +1152,9 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     useImperativeHandle(
       ref,
       () => ({
-        setDraft: (text: string) => {
+        setDraft: (text: string, options?: ChatComposerDraftOptions) => {
+          pendingEntryFromRef.current = options?.entryFrom ?? null;
+          pendingSessionModeRef.current = options?.sessionMode ?? null;
           setDraft(text);
           editorRef.current?.setText(text);
           editorRef.current?.focus();
@@ -957,15 +1222,46 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
           pendingEntryFromRef.current = 'next_step';
           applyDesignToolboxSkillByIdRef.current(skillId);
         },
-        openDesignToolbox: () => {
+        openDesignToolbox: (opener?: HTMLElement | null) => {
+          cancelComposerPanelClose();
           setComposerEngaged(true);
+          panelOpenerRef.current = resolveStandalonePanelOpener(opener);
+          // The two popovers share one anchor spot — opening one closes the
+          // other so hover-switching between the pills swaps panels.
+          setPluginsPanelOpen(false);
           setDesignToolboxOpen(true);
+        },
+        openPluginsPanel: (opener?: HTMLElement | null) => {
+          cancelComposerPanelClose();
+          setComposerEngaged(true);
+          panelOpenerRef.current = resolveStandalonePanelOpener(opener);
+          setDesignToolboxOpen(false);
+          setPluginsPanelOpen(true);
+        },
+        scheduleComposerPanelClose: () => {
+          scheduleComposerPanelClose();
+        },
+        openPlusMenu: (submenu?: PlusMenuSubmenu) => {
+          setComposerEngaged(true);
+          setPlusMenuOpenRequest((prev) => ({
+            nonce: (prev?.nonce ?? 0) + 1,
+            ...(submenu ? { submenu } : {}),
+          }));
         },
       }),
       [connectors, mcpServers, pluginsForComposer, skills]
     );
 
     function reset() {
+      pendingEntryFromRef.current = null;
+      pendingSessionModeRef.current = null;
+      const linkedWorkspaceContexts = stagedWorkspaceContexts.filter((item) => (
+        Boolean(item.absolutePath?.trim()) && Boolean(workspaceLinkedDirAdds[item.id])
+      ));
+      const linkedWorkspaceContextIds = new Set(linkedWorkspaceContexts.map((item) => item.id));
+      const nextWorkspaceLinkedDirAdds = Object.fromEntries(
+        Object.entries(workspaceLinkedDirAdds).filter(([id]) => linkedWorkspaceContextIds.has(id)),
+      );
       setDraft("");
       setStaged([]);
       nextAttachmentOrderRef.current = 0;
@@ -973,7 +1269,14 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       setStagedSkills([]);
       setStagedMcpServers([]);
       setStagedConnectors([]);
-      setStagedWorkspaceContexts([]);
+      setStagedWorkspaceContexts(linkedWorkspaceContexts);
+      setWorkspaceLinkedDirAdds(nextWorkspaceLinkedDirAdds);
+      if (
+        promotedWorkspaceContextDir &&
+        !linkedWorkspaceContexts.some((item) => item.absolutePath?.trim() === promotedWorkspaceContextDir)
+      ) {
+        setPromotedWorkspaceContextDir(null);
+      }
       pluginsSectionRef.current?.clear();
       inlineBackedPluginRef.current = null;
       setActiveAppliedPlugin(null);
@@ -1027,6 +1330,51 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       return Object.keys(meta).length > 0 ? meta : undefined;
     }
 
+    function finishComposedSend(
+      outcome: ChatSendOutcome | Promise<ChatSendOutcome>,
+      pendingMetadata?: { entryFrom: ChatSendMeta['entryFrom'] | null; sessionMode: ChatSessionMode | null },
+    ) {
+      void Promise.resolve(outcome).then(
+        (result) => {
+          if (result === 'restore-draft') {
+            if (pendingMetadata?.entryFrom && !pendingEntryFromRef.current) {
+              pendingEntryFromRef.current = pendingMetadata.entryFrom;
+            }
+            if (pendingMetadata?.sessionMode && !pendingSessionModeRef.current) {
+              pendingSessionModeRef.current = pendingMetadata.sessionMode;
+            }
+            return;
+          }
+          reset();
+        },
+        () => {
+          if (pendingMetadata?.entryFrom && !pendingEntryFromRef.current) {
+            pendingEntryFromRef.current = pendingMetadata.entryFrom;
+          }
+          if (pendingMetadata?.sessionMode && !pendingSessionModeRef.current) {
+            pendingSessionModeRef.current = pendingMetadata.sessionMode;
+          }
+        },
+      ).finally(() => {
+        composedSendPendingRef.current = false;
+      });
+    }
+
+    function beginComposedSend(
+      send: () => ChatSendOutcome | Promise<ChatSendOutcome>,
+      pendingMetadata?: { entryFrom: ChatSendMeta['entryFrom'] | null; sessionMode: ChatSessionMode | null },
+    ): boolean {
+      if (composedSendPendingRef.current) return false;
+      composedSendPendingRef.current = true;
+      try {
+        finishComposedSend(send(), pendingMetadata);
+        return true;
+      } catch (error) {
+        composedSendPendingRef.current = false;
+        throw error;
+      }
+    }
+
     function sendComposedTurn(
       prompt: string,
       attachments: ChatAttachment[],
@@ -1046,17 +1394,23 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
               ...attachments,
             ]
           : attachments;
-      // Apply a pending Next-step tag if the caller didn't set its own
-      // entry_from, then clear it so it only colours the immediate next send.
+      // Apply pending Next-step metadata if the caller didn't set its own
+      // fields, then clear it so it only colors the immediate next send.
       const pendingEntryFrom = pendingEntryFromRef.current;
+      const pendingSessionMode = pendingSessionModeRef.current;
       pendingEntryFromRef.current = null;
-      const effectiveMeta: ChatSendMeta | undefined =
-        pendingEntryFrom && !meta?.entryFrom
-          ? { ...(meta ?? {}), entryFrom: pendingEntryFrom }
-          : meta;
-      onSend(prompt, nextAttachments, nextCommentAttachments, effectiveMeta);
-      reset();
-      return true;
+      pendingSessionModeRef.current = null;
+      const effectiveMetaShape: ChatSendMeta = {
+        ...(meta ?? {}),
+        ...(pendingEntryFrom && !meta?.entryFrom ? { entryFrom: pendingEntryFrom } : {}),
+        ...(pendingSessionMode && !meta?.sessionMode ? { sessionMode: pendingSessionMode } : {}),
+      };
+      const effectiveMeta =
+        Object.keys(effectiveMetaShape).length > 0 ? effectiveMetaShape : undefined;
+      return beginComposedSend(
+        () => onSend(prompt, nextAttachments, nextCommentAttachments, effectiveMeta),
+        { entryFrom: pendingEntryFrom, sessionMode: pendingSessionMode },
+      );
     }
 
     function queueMeta(meta?: ChatSendMeta): ChatSendMeta {
@@ -1105,6 +1459,161 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       draftRef.current = text;
       setDraft(text);
       editorRef.current?.setText(text);
+    }
+
+    function insertInlineMentionSeparator() {
+      const current = editorRef.current?.getText() ?? draftRef.current;
+      if (current.trim() && !/\s$/.test(current)) {
+        editorRef.current?.insertText(' ');
+      }
+    }
+
+    function appendWorkspacePrompt(item: WorkspaceContextItem) {
+      setStagedWorkspaceContexts((current) =>
+        current.some((candidate) => candidate.id === item.id)
+          ? current
+          : [...current, item],
+      );
+      insertInlineMentionSeparator();
+      editorRef.current?.insertMention({
+        token: inlineMentionToken(item.label),
+        entity: { id: item.id, kind: 'workspace', label: item.label },
+      });
+      setMention(null);
+      setSlash(null);
+      setComposerEngaged(true);
+    }
+
+    async function addLinkedDirs(dirs: string[]): Promise<Map<string, TrackedWorkspaceLinkedDir | null> | false> {
+      if (!projectId) return false;
+      const trimmedDirs = Array.from(new Set(dirs.map((dir) => dir.trim()).filter(Boolean)));
+      if (trimmedDirs.length === 0) return new Map();
+      const base = projectMetadata ?? { kind: 'prototype' as const };
+      const existing = base.linkedDirs ?? [];
+      const nextLinkedDirs = [...existing];
+      const trackedByDir = new Map<string, TrackedWorkspaceLinkedDir | null>();
+      let changed = false;
+      for (const trimmed of trimmedDirs) {
+        if (nextLinkedDirs.includes(trimmed)) {
+          const ownedByWorkspaceContext = Object.values(workspaceLinkedDirAdds).some(
+            (tracked) => tracked.dir === trimmed,
+          );
+          trackedByDir.set(trimmed, ownedByWorkspaceContext ? { dir: trimmed, previousLinkedDirs: existing } : null);
+          continue;
+        }
+        nextLinkedDirs.push(trimmed);
+        trackedByDir.set(trimmed, { dir: trimmed, previousLinkedDirs: existing });
+        changed = true;
+      }
+      if (changed) {
+        const metadata: ProjectMetadata = { ...base, linkedDirs: nextLinkedDirs };
+        const result = await patchProject(projectId, { metadata }, workspaceContext);
+        if (!result?.metadata) {
+          onShowToast?.(t('homeWorkingDir.applyFailed'));
+          return false;
+        }
+        onProjectMetadataChange?.(result);
+        for (const trimmed of trimmedDirs) void rememberRecentDir(trimmed);
+      }
+      return trackedByDir;
+    }
+
+    async function addLinkedDir(dir: string): Promise<TrackedWorkspaceLinkedDir | null | false> {
+      const trackedByDir = await addLinkedDirs([dir]);
+      if (trackedByDir === false) return false;
+      return trackedByDir.get(dir.trim()) ?? null;
+    }
+
+    async function handleReferenceProjects(selections: ProjectReferenceSelection[]) {
+      const items = selections.map(({ project, resolvedDir }) => {
+        const path = resolvedDir.trim();
+        return {
+          id: `project:${project.id}`,
+          kind: 'project',
+          label: project.name || project.id,
+          title: project.name || project.id,
+          path: project.id,
+          ...(path ? { absolutePath: path } : {}),
+        } satisfies WorkspaceContextItem;
+      });
+      const trackedByDir = await addLinkedDirs(items.map((item) => workspaceContextLinkedDir(item) ?? ''));
+      if (trackedByDir === false) {
+        trackContextLinkResult(analytics.track, {
+          page_name: 'chat_panel',
+          area: 'chat_composer',
+          context_kind: 'project',
+          result: 'failed',
+          count: items.length,
+          ...(projectId ? { project_id: projectId } : {}),
+        });
+        return;
+      }
+      for (const item of items) {
+        appendWorkspacePrompt(item);
+      }
+      setProjectReferenceOpen(false);
+      trackContextLinkResult(analytics.track, {
+        page_name: 'chat_panel',
+        area: 'chat_composer',
+        context_kind: 'project',
+        result: 'success',
+        count: items.length,
+        ...(projectId ? { project_id: projectId } : {}),
+      });
+      const trackedAdds: Record<string, TrackedWorkspaceLinkedDir> = {};
+      for (const item of items) {
+        const path = workspaceContextLinkedDir(item);
+        const trackedLinkedDir = path ? trackedByDir.get(path) ?? null : null;
+        if (trackedLinkedDir) trackedAdds[item.id] = trackedLinkedDir;
+      }
+      if (Object.keys(trackedAdds).length > 0) {
+        setWorkspaceLinkedDirAdds((current) => ({ ...current, ...trackedAdds }));
+      }
+    }
+
+    async function handleLinkLocalCodeContext() {
+      const selected = await openFolderDialog();
+      if (!selected) {
+        trackContextLinkResult(analytics.track, {
+          page_name: 'chat_panel',
+          area: 'chat_composer',
+          context_kind: 'local_code',
+          result: 'cancelled',
+          ...(projectId ? { project_id: projectId } : {}),
+        });
+        return;
+      }
+      const trackedLinkedDir = await addLinkedDir(selected);
+      if (trackedLinkedDir === false) {
+        trackContextLinkResult(analytics.track, {
+          page_name: 'chat_panel',
+          area: 'chat_composer',
+          context_kind: 'local_code',
+          result: 'failed',
+          ...(projectId ? { project_id: projectId } : {}),
+        });
+        return;
+      }
+      const label = selected.split(/[/\\]/).filter(Boolean).pop() || selected;
+      const item: WorkspaceContextItem = {
+        id: `local-code:${selected}`,
+        kind: 'local-code',
+        label,
+        title: label,
+        absolutePath: selected,
+      };
+      appendWorkspacePrompt(item);
+      if (trackedLinkedDir) {
+        setWorkspaceLinkedDirAdds((current) => ({ ...current, [item.id]: trackedLinkedDir }));
+      }
+      trackContextLinkResult(analytics.track, {
+        page_name: 'chat_panel',
+        area: 'chat_composer',
+        context_kind: 'local_code',
+        result: 'success',
+        count: 1,
+        ...(projectId ? { project_id: projectId } : {}),
+      });
     }
 
     async function insertSkillMention(skill: SkillSummary) {
@@ -1304,17 +1813,65 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       ]));
     }
 
-    function removeWorkspaceContext(id: string) {
+    function workspaceContextDirStillReferenced(id: string, dir: string): boolean {
+      return Object.entries(workspaceLinkedDirAdds).some(
+        ([candidateId, candidate]) => candidateId !== id && candidate.dir === dir,
+      ) || selectedWorkspaceContexts.some((item) => (
+        item.id !== id && workspaceContextLinkedDir(item) === dir
+      )) || workingDir === dir;
+    }
+
+    async function removeTrackedWorkspaceLinkedDir(
+      id: string,
+      tracked: TrackedWorkspaceLinkedDir,
+    ): Promise<boolean> {
+      if (!projectId) return true;
+      if (workspaceContextDirStillReferenced(id, tracked.dir)) {
+        setWorkspaceLinkedDirAdds((current) => {
+          const { [id]: _removed, ...rest } = current;
+          return rest;
+        });
+        return true;
+      }
+      const base = projectMetadata ?? { kind: 'prototype' as const };
+      const currentLinkedDirs = base.linkedDirs ?? [...tracked.previousLinkedDirs, tracked.dir];
+      const nextLinkedDirs = currentLinkedDirs.filter((dir) => dir !== tracked.dir);
+      const metadata: ProjectMetadata = { ...base, linkedDirs: nextLinkedDirs };
+      const result = await patchProject(projectId, { metadata }, workspaceContext);
+      if (!result?.metadata) {
+        onShowToast?.(t('homeWorkingDir.applyFailed'));
+        return false;
+      }
+      onProjectMetadataChange?.(result);
+      setWorkspaceLinkedDirAdds((current) => {
+        const { [id]: _removed, ...rest } = current;
+        return rest;
+      });
+      return true;
+    }
+
+    async function removeWorkspaceContext(id: string) {
       trackComposerBar({ element: 'context_remove', resource_kind: 'workspace', resource_id: id });
-      if (visibleWorkspaceContext?.id === id) setDismissedWorkspaceContextId(id);
       const workspaceItem = selectedWorkspaceContexts.find((item) => item.id === id) ?? null;
+      const trackedLinkedDir = workspaceLinkedDirAdds[id] ?? null;
+      if (trackedLinkedDir && !(await removeTrackedWorkspaceLinkedDir(id, trackedLinkedDir))) {
+        return;
+      }
+      if (visibleWorkspaceContext?.id === id) setDismissedWorkspaceContextId(id);
       setStagedWorkspaceContexts((prev) => prev.filter((item) => item.id !== id));
+      if (!trackedLinkedDir) {
+        setWorkspaceLinkedDirAdds((current) => {
+          const { [id]: _removed, ...rest } = current;
+          return rest;
+        });
+      }
       if (workspaceItem) {
-        replaceEditorDraft(stripInlineMentionLabels(draft, [
+        replaceEditorDraft(stripInlineMentionLabels(draftRef.current, [
           workspaceItem.label,
           workspaceItem.id,
           workspaceItem.title ?? '',
           workspaceItem.path ?? '',
+          workspaceItem.absolutePath ?? '',
           workspaceItem.url ?? '',
         ]));
       }
@@ -1338,7 +1895,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       const cohort = deriveUploadCohort(files);
       const orderStart = reserveAttachmentOrders(files.length);
       try {
-        const result = await uploadProjectFiles(id, files);
+        const result = await uploadProjectFiles(id, files, undefined, workspaceContext);
         if (result.uploaded.length > 0) {
           const orderedUploaded = assignChatAttachmentOrders(result.uploaded, orderStart);
           appendOrderedStagedAttachments(orderedUploaded);
@@ -1374,6 +1931,71 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
           result: 'failed',
           error_code: detail,
         });
+      } finally {
+        setUploading(false);
+      }
+    }
+
+    // "Select from library" (资源库): copy each chosen asset into the project's
+    // design files and stage it as an attachment chip, mirroring how the native
+    // file picker materializes uploads into the project on attach. The apply
+    // call records a provenance back-link so the registry knows the asset was
+    // consumed.
+    async function addAssetsFromLibrary(assets: LibraryAsset[]) {
+      if (assets.length === 0) return;
+      const id = await ensureProject();
+      if (!id) return;
+      setUploading(true);
+      setUploadError(null);
+      const orderStart = reserveAttachmentOrders(assets.length);
+      try {
+        const applied: ChatAttachment[] = [];
+        // Element-pick captures carry their picked node's markup; collect it so
+        // we can drop the HTML straight into the composer input (the image still
+        // attaches as a normal reference).
+        const elementBlocks: string[] = [];
+        let failed = 0;
+        for (const asset of assets) {
+          const res = await applyLibraryAsset(
+            asset.id,
+            id,
+            undefined,
+            undefined,
+            workspaceContext,
+          );
+          if (!res?.relPath) {
+            failed += 1;
+            continue;
+          }
+          applied.push({
+            path: res.relPath,
+            name: assetTitle(asset),
+            kind: asset.kind === 'image' ? 'image' : 'file',
+          });
+          const element = elementMetaOf(asset);
+          if (element?.hasHtml) {
+            const html = await fetchLibraryAssetElementHtml(asset.id);
+            if (html) elementBlocks.push(formatElementHtmlBlock(asset, element, html));
+          }
+        }
+        if (applied.length > 0) {
+          appendOrderedStagedAttachments(assignChatAttachmentOrders(applied, orderStart));
+        }
+        if (elementBlocks.length > 0) {
+          const existing = editorRef.current?.getText() ?? '';
+          editorRef.current?.insertText((existing.trim() ? '\n\n' : '') + elementBlocks.join('\n\n'));
+          editorRef.current?.focus();
+        }
+        if (failed > 0) {
+          setUploadError(
+            applied.length > 0
+              ? `Added ${applied.length} item(s), but ${failed} failed.`
+              : `Could not add ${failed} item(s) from the library.`,
+          );
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        setUploadError(`Could not add from library (${detail}).`);
       } finally {
         setUploading(false);
       }
@@ -1431,34 +2053,9 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 return;
               }
               setUploading(true);
-              const result = await uploadProjectFiles(id, annotationFiles);
+              const result = await uploadProjectFiles(id, annotationFiles, undefined, workspaceContext);
               if (result.uploaded.length > 0) {
                 uploaded = assignChatAttachmentOrders(result.uploaded, orderStart);
-                const screenshot = detail.file ? uploaded[0] : null;
-                if (screenshot && detail.markKind && detail.bounds) {
-                  visualAttachmentInput = {
-                    order: isFiniteAttachmentOrder(screenshot.order) ? screenshot.order : orderStart,
-                    idSeed: screenshot.path,
-                    screenshotPath: screenshot.path,
-                    markKind: detail.markKind,
-                    note: detail.note,
-                    bounds: detail.bounds,
-                    target: detail.target
-                      ? {
-                          filePath: detail.target.filePath || detail.filePath || screenshot.path,
-                          elementId: detail.target.elementId,
-                          selector: detail.target.selector,
-                          label: detail.target.label,
-                          text: detail.target.text,
-                          position: detail.target.position,
-                          htmlHint: detail.target.htmlHint,
-                        }
-                      : {
-                          filePath: detail.filePath || screenshot.path,
-                          position: detail.bounds,
-                        },
-                  };
-                }
               }
               if (result.failed.length > 0) {
                 const detailText = result.error ? ` (${result.error})` : '';
@@ -1468,6 +2065,38 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                   return;
                 }
               }
+            }
+            // The structured visual comment is built whenever the mark has a
+            // location, with or without the screenshot upload. When the
+            // preview capture failed (#4080) the screenshot is absent, but
+            // file/bounds/markKind still anchor the marked region for the
+            // agent (#4084) — dropping them would reduce the send to bare
+            // prose and force the agent to guess what "this part" means.
+            if (detail.markKind && detail.bounds) {
+              const screenshot = detail.file && uploaded.length > 0 ? uploaded[0] : null;
+              visualAttachmentInput = {
+                order: screenshot && isFiniteAttachmentOrder(screenshot.order) ? screenshot.order : 1,
+                idSeed: screenshot?.path
+                  ?? `${detail.filePath || 'preview'}-${detail.markKind}-${Math.round(detail.bounds.x * 1000)}-${Math.round(detail.bounds.y * 1000)}`,
+                ...(screenshot ? { screenshotPath: screenshot.path } : {}),
+                markKind: detail.markKind,
+                note: detail.note,
+                bounds: detail.bounds,
+                target: detail.target
+                  ? {
+                      filePath: detail.target.filePath || detail.filePath || screenshot?.path || '',
+                      elementId: detail.target.elementId,
+                      selector: detail.target.selector,
+                      label: detail.target.label,
+                      text: detail.target.text,
+                      position: detail.target.position,
+                      htmlHint: detail.target.htmlHint,
+                    }
+                  : {
+                      filePath: detail.filePath || screenshot?.path || '',
+                      position: detail.bounds,
+                    },
+              };
             }
             setUploading(false);
 
@@ -1575,6 +2204,25 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       t,
     ]);
 
+    // Stages attachments that a surface already uploaded to the project itself
+    // (ChatAttachment shape, not File) — e.g. the design browser's hover
+    // "添加到对话" capture, which writes the PNG via writeProjectBase64File
+    // before notifying the composer. Mirrors ANNOTATION_EVENT's pattern above.
+    useEffect(() => {
+      function onStageAttachment(e: Event) {
+        const detail = (e as CustomEvent<StageAttachmentEventDetail>).detail;
+        const attachments = detail?.attachments?.filter(
+          (item): item is ChatAttachment => Boolean(item && item.path && item.name),
+        );
+        if (!attachments || attachments.length === 0) return;
+        const orderStart = reserveAttachmentOrders(attachments.length);
+        appendOrderedStagedAttachments(assignChatAttachmentOrders(attachments, orderStart));
+        editorRef.current?.focus();
+      }
+      window.addEventListener(STAGE_ATTACHMENT_EVENT, onStageAttachment);
+      return () => window.removeEventListener(STAGE_ATTACHMENT_EVENT, onStageAttachment);
+    }, [staged]);
+
     useEffect(() => {
       if (!streamingAnnotationSendPending || !streamingAnnotationSendPendingRef.current) return;
       if (streaming || sendDisabled) return;
@@ -1623,27 +2271,67 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       if (files.length > 0) void uploadFiles(files);
     }
 
+    // Dragging the shell's gray backdrop (not its children) vertically
+    // resizes the editor: up = taller. Dragging back at/below the default
+    // height clears the override and returns to auto-grow.
+    function handleShellResizeMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+      if (e.target !== e.currentTarget) return;
+      if (e.button !== 0) return;
+      const editorEl = e.currentTarget.querySelector<HTMLElement>('.composer-input-editor');
+      if (!editorEl) return;
+      e.preventDefault();
+      const startY = e.clientY;
+      const startHeight = editorEl.getBoundingClientRect().height;
+      const DEFAULT_MIN = 72;
+      const onMove = (ev: MouseEvent) => {
+        const delta = startY - ev.clientY;
+        const max = Math.round(window.innerHeight * 0.6);
+        const next = Math.min(max, Math.max(DEFAULT_MIN, Math.round(startHeight + delta)));
+        setManualEditorHeight(next <= DEFAULT_MIN + 4 ? null : next);
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        document.body.style.removeProperty('cursor');
+        document.body.style.removeProperty('user-select');
+      };
+      document.body.style.cursor = 'ns-resize';
+      document.body.style.userSelect = 'none';
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    }
+
     async function handleLinkFolder() {
       if (!projectId) return;
       const selected = await openFolderDialog();
       if (!selected) return;
-      const base = projectMetadata ?? { kind: 'prototype' as const };
-      const existing = base.linkedDirs ?? [];
-      if (existing.includes(selected)) return;
-      const metadata: ProjectMetadata = { ...base, linkedDirs: [...existing, selected] };
-      const result = await patchProject(projectId, { metadata });
-      if (result?.metadata) onProjectMetadataChange?.(result.metadata);
+      await addLinkedDir(selected);
+    }
+
+    function linkedDirsWithWorkspaceContext(primaryDir: string | null): string[] {
+      const primary = primaryDir?.trim();
+      const contextDirs = primary
+        ? workspaceContextMetadataLinkedDirList.filter((dir) => dir !== primary)
+        : workspaceContextMetadataLinkedDirList;
+      return Array.from(new Set([
+        ...(primary ? [primary] : []),
+        ...contextDirs,
+      ]));
     }
 
     // The WorkingDirPicker treats the project's working directory as a single
-    // primary folder, so selecting one replaces `linkedDirs`. The folder is
-    // read-only awareness for the agent (→ `--add-dir`), not a Design Files
-    // import, and `baseDir` is never touched.
+    // primary folder, so selecting one replaces the primary `linkedDirs` entry
+    // while preserving staged workspace-context dirs. The folder is read-only
+    // awareness for the agent (→ `--add-dir`), not a Design Files import, and
+    // `baseDir` is never touched.
     async function setWorkingDirFolder(dir: string) {
       if (!projectId) return;
       const base = projectMetadata ?? { kind: 'prototype' as const };
-      const metadata: ProjectMetadata = { ...base, linkedDirs: [dir] };
-      const result = await patchProject(projectId, { metadata });
+      const metadata: ProjectMetadata = {
+        ...base,
+        linkedDirs: linkedDirsWithWorkspaceContext(dir),
+      };
+      const result = await patchProject(projectId, { metadata }, workspaceContext);
       // The daemon rejects stale/inaccessible/system dirs with
       // INVALID_LINKED_DIR (patchProject → null). Only commit the selection
       // and promote it in recents when the project accepted it; otherwise
@@ -1653,7 +2341,19 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
         onShowToast?.(t('homeWorkingDir.applyFailed'));
         return;
       }
-      onProjectMetadataChange?.(result.metadata);
+      onProjectMetadataChange?.(result);
+      const promotedDir = dir.trim();
+      setPromotedWorkspaceContextDir(
+        selectedWorkspaceContextDirs.includes(promotedDir) ? promotedDir : null,
+      );
+      setWorkspaceLinkedDirAdds((current) => {
+        const nextEntries = Object.entries(current).filter(([, tracked]) => (
+          tracked.dir !== promotedDir
+        ));
+        return nextEntries.length === Object.keys(current).length
+          ? current
+          : Object.fromEntries(nextEntries);
+      });
       void rememberRecentDir(dir);
     }
     async function handlePickWorkingDir() {
@@ -1663,34 +2363,16 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     async function clearWorkingDir() {
       if (!projectId) return;
       const base = projectMetadata ?? { kind: 'prototype' as const };
-      const metadata: ProjectMetadata = { ...base, linkedDirs: [] };
-      const result = await patchProject(projectId, { metadata });
-      if (result?.metadata) onProjectMetadataChange?.(result.metadata);
-    }
-
-    async function handleSwitchDesignSystem(
-      designSystemId: string | null,
-      title: string | null,
-    ): Promise<boolean> {
-      if (!projectId) return false;
-      if (designSystemId === currentDesignSystemId) return true;
-      const result = await patchProject(projectId, { designSystemId });
-      if (!result) {
-        onShowToast?.(t('chat.importDesignSystemFailed'));
-        return false;
+      const metadata: ProjectMetadata = {
+        ...base,
+        linkedDirs: linkedDirsWithWorkspaceContext(null),
+      };
+      const result = await patchProject(projectId, { metadata }, workspaceContext);
+      if (result?.metadata) {
+        setPromotedWorkspaceContextDir(null);
+        onProjectMetadataChange?.(result);
       }
-      trackComposerBar({
-        element: 'design_system_switch',
-        ...(designSystemId ? { design_system_id: designSystemId } : {}),
-      });
-      onActiveDesignSystemChange?.(result);
-      const switchedTitle = designSystemId === null
-        ? t('chat.importDesignSystemNone')
-        : title ?? designSystemId;
-      onShowToast?.(t('chat.importDesignSystemSwitched', { title: switchedTitle }));
-      return true;
     }
-
 
     // Lexical drives every text change through this callback. `present` is the
     // entity list the editor's text currently references (MentionNodes plus
@@ -1698,8 +2380,10 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
     // kind:id). We prune the staged skill/mcp/connector chips to whatever the
     // text still references — generalizing the old skill-only regex prune so a
     // hand-deleted token also drops its chip and never leaks into the run
-    // context. `staged` (files) is intentionally NOT pruned: users attach
-    // files via the upload button without leaving an `@<path>` token.
+    // context. Workspace contexts that added linked dirs are kept visible until
+    // the chip remove button clears the matching metadata access. `staged`
+    // (files) is intentionally NOT pruned: users attach files via the upload
+    // button without leaving an `@<path>` token.
     function handleEditorChange(text: string, present: InlineMentionEntity[]) {
       draftRef.current = text;
       setDraft(text);
@@ -1719,7 +2403,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
         prev.filter((c) => set.has(`connector:${c.id}`)),
       );
       setStagedWorkspaceContexts((prev) =>
-        prev.filter((item) => set.has(`workspace:${item.id}`)),
+        prev.filter((item) => set.has(`workspace:${item.id}`) || Boolean(workspaceLinkedDirAdds[item.id])),
       );
     }
 
@@ -1930,7 +2614,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
 
     async function applyProjectSkill(skill: SkillSummary): Promise<boolean> {
       if (!projectId) return false;
-      const result = await patchProject(projectId, { skillId: skill.id });
+      const result = await patchProject(projectId, { skillId: skill.id }, workspaceContext);
       if (!result) return false;
       onProjectSkillChange?.(result.skillId ?? skill.id);
       return true;
@@ -1969,22 +2653,34 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
       if (hatched) {
         if (streaming) return;
         setStreamingAnnotationSendPending(false);
-        onSend(hatched, staged, nextCommentAttachments, contextMeta);
-        reset();
+        notifyCompletionFeedbackGesture();
+        beginComposedSend(() => onSend(hatched, staged, nextCommentAttachments, contextMeta));
         return;
       }
       const search = researchAvailable ? expandSearchCommand(prompt) : null;
       if (search) {
         if (streaming) return;
         setStreamingAnnotationSendPending(false);
-        onSend(search.prompt, staged, nextCommentAttachments, {
-          ...contextMeta,
-          research: { enabled: true, query: search.query },
-        });
-        reset();
+        notifyCompletionFeedbackGesture();
+        beginComposedSend(
+          () => onSend(search.prompt, staged, nextCommentAttachments, {
+            ...contextMeta,
+            research: { enabled: true, query: search.query },
+          }),
+        );
         return;
       }
+      // A truly empty composer (no typed text, no staged attachment, no
+      // comment attachment) never sends — not even when the placeholder
+      // carousel is mid-animation. The rotating scenario text is a ghost
+      // hint rendered where the editor's own placeholder would sit; letting
+      // Send silently accept it reads to the user as "I clicked Send on an
+      // empty box and it ran something I never typed" (recvqaj7eKpxH6). The
+      // dedicated "next step" toolbox cards remain the real way to act on a
+      // suggested prompt — those explicitly type it into the composer via
+      // applyDesignToolboxAction before the user ever hits Send.
       if (!prompt && staged.length === 0 && nextCommentAttachments.length === 0) return;
+      notifyCompletionFeedbackGesture();
       sendComposedTurn(prompt, staged, nextCommentAttachments, contextMeta);
     }
 
@@ -2097,10 +2793,39 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
         .filter((s) => skillMatchesQuery(s, mentionQuery))
         .sort((a, b) => skillMentionRank(a, mentionQuery) - skillMentionRank(b, mentionQuery));
     }, [mention, mentionQuery, skills, stagedSkills]);
+    const liveCommentAttachments = currentCommentAttachments();
+    const placeholderCarouselActive =
+      !streaming
+      && !sendDisabled
+      && !activeFileContext
+      && placeholderScenarios.length > 0
+      && draft.trim().length === 0
+      && staged.length === 0
+      && liveCommentAttachments.length === 0
+      && !mention
+      && !slash;
+    // Deliberately does NOT include the placeholder carousel's rotating
+    // scenario text: that ghost text stands in for the editor's own
+    // placeholder while the composer is genuinely empty, and must never make
+    // Send (or Enter) submittable on its own — see the emptiness guard in
+    // `submit()` above (recvqaj7eKpxH6).
     const hasComposerPayload =
-      draft.trim().length > 0 || staged.length > 0 || currentCommentAttachments().length > 0;
+      draft.trim().length > 0
+      || staged.length > 0
+      || liveCommentAttachments.length > 0;
     const showStopButton = streaming && !hasComposerPayload;
     const showSendButton = !streaming || hasComposerPayload;
+
+    const openDesignSystemPicker = () => {
+      const trigger = composerRootRef.current?.querySelector<HTMLButtonElement>(
+        '[data-testid="project-ds-picker-trigger"]',
+      );
+      if (!trigger || trigger.disabled) return;
+      window.requestAnimationFrame(() => {
+        if (trigger.getAttribute('aria-expanded') !== 'true') trigger.click();
+        trigger.focus({ preventScroll: true });
+      });
+    };
 
     return (
       <div
@@ -2108,17 +2833,124 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
           'composer',
           dragActive ? 'drag-active' : '',
           activeFileContext ? 'composer-active-file-mode' : '',
+          inputDisabled ? 'composer-readonly' : '',
         ].filter(Boolean).join(' ')}
         data-testid="chat-composer"
         ref={composerRootRef}
         onDragOver={(e) => {
+          if (inputDisabled) return;
           e.preventDefault();
           setDragActive(true);
         }}
         onDragLeave={() => setDragActive(false)}
-        onDrop={handleDrop}
+        onDrop={inputDisabled ? undefined : handleDrop}
       >
-        <div className="composer-shell">
+        {designToolboxOpen ? (
+          <div className="composer-toolbox-standalone">
+            {/* Click-catcher backdrop. A <div> (not a <button>) so it never
+                inherits the app's global button:hover fill, which otherwise
+                painted the whole screen when the cursor crossed it. */}
+            <div
+              className="composer-toolbox-standalone-backdrop"
+              aria-hidden="true"
+              onClick={dismissStandalonePanels}
+            />
+            <div
+              className="plus-menu__popup composer-toolbox-standalone-popup"
+              role="menu"
+              onMouseEnter={cancelComposerPanelClose}
+              onMouseLeave={scheduleComposerPanelClose}
+            >
+              <DesignToolboxPanel
+                workspaceContext={workspaceContext}
+                actions={DESIGN_TOOLBOX_ACTIONS}
+                skills={skills}
+                plugins={pluginsForComposer}
+                mcpServers={enabledMcpServers}
+                mcpTemplates={mcpTemplates}
+                connectors={connectors}
+                projectFiles={projectFiles}
+                activeSkillIds={stagedSkills.map((skill) => skill.id)}
+                activePluginId={activeAppliedPlugin?.pluginId ?? pinnedPluginId ?? null}
+                activeMcpServerIds={stagedMcpServers.map((server) => server.id)}
+                activeConnectorIds={stagedConnectors.map((connector) => connector.id)}
+                activeFilePaths={staged.map((item) => item.path)}
+                onOpened={() => trackDesignToolbox({ element: 'design_toolbox_open' })}
+                onPickAction={(action) => {
+                  trackDesignToolbox({
+                    element: 'design_toolbox_action',
+                    toolbox_action_id: action.id,
+                  });
+                  applyDesignToolboxAction(action);
+                  setDesignToolboxOpen(false);
+                }}
+                onPickSkill={(skill) => {
+                  trackDesignToolbox({
+                    element: 'design_toolbox_resource',
+                    resource_kind: 'skill',
+                    resource_id: skill.id,
+                  });
+                  applyDesignToolboxSkill(skill);
+                  setDesignToolboxOpen(false);
+                }}
+                onPickResource={(resource) => {
+                  trackDesignToolbox({
+                    element: 'design_toolbox_resource',
+                    ...designToolboxResourceTracking(resource),
+                  });
+                  applyDesignToolboxResource(resource);
+                  setDesignToolboxOpen(false);
+                }}
+              />
+            </div>
+          </div>
+        ) : null}
+        {/* Standalone plugins popover — the 插件 quick pill's surface, now
+            that the "+" menu no longer carries a plugins row. Same anchor
+            and backdrop pattern as the toolbox popover above. */}
+        {pluginsPanelOpen ? (
+          <div className="composer-toolbox-standalone">
+            <div
+              className="composer-toolbox-standalone-backdrop"
+              aria-hidden="true"
+              onClick={dismissStandalonePanels}
+            />
+            <div
+              className="plus-menu__popup composer-toolbox-standalone-popup composer-plugins-standalone-popup"
+              role="menu"
+              onMouseEnter={cancelComposerPanelClose}
+              onMouseLeave={scheduleComposerPanelClose}
+            >
+              <StandalonePluginsPane
+                workspaceContext={workspaceContext}
+                plugins={pluginsForComposer}
+                onPick={(record) => {
+                  trackComposerBar({
+                    element: 'plus_pick',
+                    resource_kind: 'plugin',
+                    resource_id: record.id,
+                  });
+                  void insertPluginMention(record);
+                  setPluginsPanelOpen(false);
+                }}
+                onAdd={onBrowsePlugins ? () => {
+                  trackComposerBar({ element: 'plus_add', resource_kind: 'plugin' });
+                  setPluginsPanelOpen(false);
+                  onBrowsePlugins();
+                } : undefined}
+              />
+            </div>
+          </div>
+        ) : null}
+        <div
+          className={`composer-shell${manualEditorHeight != null ? ' composer-shell--manual-height' : ''}`}
+          style={
+            manualEditorHeight != null
+              ? ({ '--composer-manual-h': `${manualEditorHeight}px` } as React.CSSProperties)
+              : undefined
+          }
+          onMouseDown={handleShellResizeMouseDown}
+        >
           {/*
             Spec §8.4 — context bar above the composer input. The
             section now behaves as a pure context bar: it renders the
@@ -2148,15 +2980,22 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 setActiveAppliedPlugin(null);
               }}
               onChipDetails={(item: ContextItem) => {
-                if (item.kind !== 'plugin') return;
-                const record = installedPlugins.find((p) => p.id === item.id);
-                if (record) setDetailsRecord(record);
+                if (item.kind === 'plugin') {
+                  const record = installedPlugins.find((p) => p.id === item.id);
+                  if (record) setDetailsRecord(record);
+                  return;
+                }
+                if (item.kind === 'skill') {
+                  setDetailsSkill({
+                    id: item.id,
+                    summary: skills.find((skill) => skill.id === item.id) ?? null,
+                  });
+                }
               }}
             />
           ) : null}
-          {designSystemPicker || selectedWorkspaceContexts.length > 0 || stagedSkills.length > 0 || stagedMcpServers.length > 0 || stagedConnectors.length > 0 || staged.length > 0 || activeAppliedPlugin ? (
+          {selectedWorkspaceContexts.length > 0 || stagedSkills.length > 0 || stagedMcpServers.length > 0 || stagedConnectors.length > 0 || staged.length > 0 || activeAppliedPlugin ? (
             <StagedRunContexts
-              designSystemPicker={designSystemPicker}
               workspaceItems={selectedWorkspaceContexts}
               currentWorkspaceContextId={visibleWorkspaceContext?.id ?? null}
               skills={stagedSkills}
@@ -2184,6 +3023,14 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
               onPluginDetails={(id) => {
                 const record = installedPlugins.find((plugin) => plugin.id === id);
                 if (record) setDetailsRecord(record);
+              }}
+              onSkillDetails={(id) => {
+                setDetailsSkill({
+                  id,
+                  summary: stagedSkills.find((skill) => skill.id === id)
+                    ?? skills.find((skill) => skill.id === id)
+                    ?? null,
+                });
               }}
               t={t}
             />
@@ -2214,17 +3061,27 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
               picker will reuse. */}
           <div
             className="composer-input-wrap"
-            onFocus={() => setComposerEngaged(true)}
+            onFocus={() => {
+              setComposerEngaged(true);
+              setComposerFocused(true);
+            }}
+            onBlur={(event) => {
+              if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+              setComposerFocused(false);
+            }}
           >
             <LexicalComposerInput
               ref={editorRef}
               draft={draft}
+              inputDisabled={inputDisabled}
               placeholder={
                 activeFileDisplayName
                   ? t('chat.activeFilePlaceholder', { file: activeFileDisplayName })
-                  : t('chat.composerPlaceholder')
+                  : placeholderCarouselActive
+                    ? ''
+                    : composerPlaceholder ?? t('chat.composerPlaceholder')
               }
-              title={activeFileDisplayName ?? t('chat.composerPlaceholder')}
+              title={activeFileDisplayName ?? composerPlaceholder ?? t('chat.composerPlaceholder')}
               knownEntities={composerMentionEntities}
               onChange={handleEditorChange}
               onTrigger={handleEditorTrigger}
@@ -2237,6 +3094,14 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 activeId: mention ? `mention-opt-${mentionIndex}` : null,
               }}
             />
+            {placeholderScenarios.length > 0 ? (
+              <PlaceholderCarousel
+                scenarios={placeholderScenarios}
+                active={placeholderCarouselActive}
+                paused={composerFocused}
+                onScenarioChange={setPlaceholderScenario}
+              />
+            ) : null}
           </div>
           <CaretFloatingLayer
             caret={caretRect}
@@ -2257,7 +3122,7 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 setMentionIndex(0);
               }}
               activeIndex={mentionIndex}
-              currentSkillId={currentSkillId}
+              stagedSkillIds={new Set(stagedSkills.map((skill) => skill.id))}
               onPickFile={insertMention}
               onPickWorkspaceContext={insertWorkspaceMention}
               onPickPlugin={(record) => void insertPluginMention(record)}
@@ -2293,10 +3158,28 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
               }}
             />
             <ComposerPlusMenu
+              workspaceContext={workspaceContext}
               triggerTestId="chat-plus-trigger"
+              placementPreference="up"
+              openRequest={plusMenuOpenRequest}
               onOpen={() => {
                 trackComposerBar({ element: 'plus_menu_open' });
                 setComposerEngaged(true);
+              }}
+              onSubmenuOpen={(submenu) => {
+                // The toolbox flyout tracks its own open (design_toolbox_open);
+                // the working-dir flyout carries actions, not a resource list.
+                if (submenu === 'toolbox' || submenu === 'workingDir') return;
+                trackComposerBar({
+                  element: 'plus_submenu_open',
+                  resource_kind: PLUS_SUBMENU_RESOURCE_KIND[submenu],
+                });
+              }}
+              onSearchUsed={(submenu) => {
+                trackComposerBar({
+                  element: 'plus_search',
+                  resource_kind: PLUS_SUBMENU_RESOURCE_KIND[submenu],
+                });
               }}
               connectors={connectors}
               onPickConnector={(connector) => {
@@ -2324,6 +3207,15 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 trackComposerBar({ element: 'plus_add', resource_kind: 'plugin' });
                 onBrowsePlugins?.();
               }}
+              skills={skills}
+              onPickSkill={(skill) => {
+                trackComposerBar({
+                  element: 'plus_pick',
+                  resource_kind: 'skill',
+                  resource_id: skill.id,
+                });
+                void insertSkillMention(skill);
+              }}
               mcpServers={enabledMcpServers}
               onPickMcp={(server) => {
                 trackComposerBar({
@@ -2345,10 +3237,74 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 });
                 fileInputRef.current?.click();
               }}
+              onReferenceProject={() => {
+                trackComposerBar({ element: 'plus_pick', resource_kind: 'workspace', resource_id: 'reference-project' });
+                trackProjectReferenceModalSurfaceView(analytics.track, {
+                  page_name: 'chat_panel',
+                  area: 'project_reference_modal',
+                  ...(projectId ? { project_id: projectId } : {}),
+                });
+                setProjectReferenceOpen(true);
+              }}
+              onLinkLocalCode={() => {
+                trackComposerBar({ element: 'plus_pick', resource_kind: 'workspace', resource_id: 'local-code' });
+                void handleLinkLocalCodeContext();
+              }}
+              workingDir={workingDir}
+              recentWorkingDirs={recentDirs}
+              onPickWorkingDir={() => {
+                trackComposerBar({ element: 'plus_pick', resource_kind: 'workspace', resource_id: 'working-dir' });
+                void handlePickWorkingDir();
+              }}
+              onSelectRecentWorkingDir={(dir) => {
+                trackComposerBar({ element: 'plus_pick', resource_kind: 'workspace', resource_id: 'working-dir-recent' });
+                void setWorkingDirFolder(dir);
+              }}
+              onClearWorkingDir={() => {
+                trackComposerBar({ element: 'plus_pick', resource_kind: 'workspace', resource_id: 'working-dir-clear' });
+                void clearWorkingDir();
+              }}
               attachLoading={uploading}
+              onSelectFromLibrary={() => {
+                trackChatPanelClick(analytics.track, {
+                  page_name: 'chat_panel',
+                  area: 'chat_panel',
+                  element: 'library',
+                });
+                setLibraryPickerOpen(true);
+              }}
+              onImportFigma={projectId ? () => {
+                trackChatPanelClick(analytics.track, {
+                  page_name: 'chat_panel',
+                  area: 'chat_panel',
+                  element: 'figma_import',
+                });
+                setFigmaModalOpen(true);
+              } : undefined}
+              onShowFigmaHelp={() => {
+                trackChatPanelClick(analytics.track, {
+                  page_name: 'chat_panel',
+                  area: 'chat_panel',
+                  element: 'figma_help',
+                });
+                trackFigmaHelpModalSurfaceView(analytics.track, {
+                  page_name: 'chat_panel',
+                  area: 'figma_help_modal',
+                  ...(projectId ? { project_id: projectId } : {}),
+                });
+                setFigmaHelpOpen(true);
+              }}
+              onOpenDesignSystems={projectId && designSystemPicker ? () => {
+                trackComposerBar({ element: 'design_system_open' });
+                openDesignSystemPicker();
+              } : undefined}
+              // 插件 and 设计百宝箱 live inside the "+" menu (right below
+              // 工作目录) as hover-expand submenus. The toolbox flyout reuses
+              // the same DesignToolboxPanel the standalone popover renders.
               toolboxLabel={t('chat.designToolbox.title')}
               renderToolbox={(close) => (
                 <DesignToolboxPanel
+                  workspaceContext={workspaceContext}
                   actions={DESIGN_TOOLBOX_ACTIONS}
                   skills={skills}
                   plugins={pluginsForComposer}
@@ -2390,69 +3346,14 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 />
               )}
             />
-            {designToolboxOpen ? (
-              <div className="composer-toolbox-standalone">
-                {/* Click-catcher backdrop. A <div> (not a <button>) so it never
-                    inherits the app's global button:hover fill, which otherwise
-                    painted the whole screen when the cursor crossed it. */}
-                <div
-                  className="composer-toolbox-standalone-backdrop"
-                  aria-hidden="true"
-                  onClick={() => setDesignToolboxOpen(false)}
-                />
-                <div
-                  className="plus-menu__popup composer-toolbox-standalone-popup"
-                  role="menu"
-                >
-                  <DesignToolboxPanel
-                    actions={DESIGN_TOOLBOX_ACTIONS}
-                    skills={skills}
-                    plugins={pluginsForComposer}
-                    mcpServers={enabledMcpServers}
-                    mcpTemplates={mcpTemplates}
-                    connectors={connectors}
-                    projectFiles={projectFiles}
-                    activeSkillIds={stagedSkills.map((skill) => skill.id)}
-                    activePluginId={activeAppliedPlugin?.pluginId ?? pinnedPluginId ?? null}
-                    activeMcpServerIds={stagedMcpServers.map((server) => server.id)}
-                    activeConnectorIds={stagedConnectors.map((connector) => connector.id)}
-                    activeFilePaths={staged.map((item) => item.path)}
-                    onOpened={() => trackDesignToolbox({ element: 'design_toolbox_open' })}
-                    onPickAction={(action) => {
-                      trackDesignToolbox({
-                        element: 'design_toolbox_action',
-                        toolbox_action_id: action.id,
-                      });
-                      applyDesignToolboxAction(action);
-                      setDesignToolboxOpen(false);
-                    }}
-                    onPickSkill={(skill) => {
-                      trackDesignToolbox({
-                        element: 'design_toolbox_resource',
-                        resource_kind: 'skill',
-                        resource_id: skill.id,
-                      });
-                      applyDesignToolboxSkill(skill);
-                      setDesignToolboxOpen(false);
-                    }}
-                    onPickResource={(resource) => {
-                      trackDesignToolbox({
-                        element: 'design_toolbox_resource',
-                        ...designToolboxResourceTracking(resource),
-                      });
-                      applyDesignToolboxResource(resource);
-                      setDesignToolboxOpen(false);
-                    }}
-                  />
-                </div>
-              </div>
-            ) : null}
+            {/* #5517: the design-system picker sits inline in the composer's
+                icon row (palette icon) instead of the staged-context bar. */}
+            {designSystemPicker}
             {leadingAccessory}
             <span className="composer-spacer" />
-            {footerAccessory}
-            <SessionModeToggle
+            <ComposerModePicker
               mode={sessionMode}
-              onChange={(next) => {
+              onModeChange={(next) => {
                 if (next !== sessionMode) {
                   trackComposerSessionModeClick(analytics.track, {
                     page_name: 'chat_panel',
@@ -2460,23 +3361,25 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                     element: 'session_mode_toggle',
                     mode_before: sessionModeToTracking(sessionMode),
                     mode_after: sessionModeToTracking(next),
-                    ...(projectId ? { project_id: projectId } : {}),
+                    project_id: projectId ?? undefined,
                   });
                 }
                 onSessionModeChange?.(next);
               }}
             />
+            {footerAccessory}
             {showStopButton ? (
               <button
                 type="button"
-                className="composer-send stop od-tooltip"
+                className="composer-send stop"
                 onClick={onStop}
-                title={t('chat.stop')}
-                data-tooltip={t('chat.stop')}
                 aria-label={t('chat.stop')}
               >
-                <Icon name="stop" size={13} />
-                <span>{t('chat.stop')}</span>
+                <ComposerRunIcon className="composer-run-glyph" />
+                <span className="composer-run-labels">
+                  <span className="composer-run-label">{t('assistant.thinking')}</span>
+                  <span className="composer-stop-label">{t('chat.stop')}</span>
+                </span>
               </button>
             ) : null}
             {showSendButton ? (
@@ -2497,49 +3400,85 @@ export const ChatComposer = forwardRef<ChatComposerHandle, Props>(
                 title={t('chat.send')}
                 data-tooltip={t('chat.send')}
               >
-                <Icon name="send" size={13} />
-                <span>{t('chat.send')}</span>
+                <Icon name="arrow-up" size={18} />
               </button>
             ) : null}
           </div>
         </div>
-        {projectId ? (
-          <div className="composer-workdir-row">
-            <WorkingDirPicker
-              placement="up"
-              workingDir={workingDir}
-              invalid={workingDirMissing}
-              recentDirs={recentDirs}
-              onOpen={() => void checkWorkingDir()}
-              onPickDirectory={() => {
-                // Fire on the click itself (intent), matching the home
-                // composer's working_dir* elements so one dashboard counts the
-                // action across both surfaces.
-                trackComposerBar({ element: 'working_dir' });
-                void handlePickWorkingDir();
-              }}
-              onSelectRecent={(dir) => {
-                trackComposerBar({ element: 'working_dir_recent' });
-                void setWorkingDirFolder(dir);
-              }}
-              onClear={() => {
-                trackComposerBar({ element: 'working_dir_clear' });
-                void clearWorkingDir();
-              }}
-            />
-          </div>
-        ) : null}
+        {/* #5517 renders no working-dir row inside a project — its ChatComposer
+            imports WorkingDirPicker but never mounts it. Product chose full
+            alignment (2026-07-21) over keeping this as the only mid-project
+            re-bind entry. Home still picks a working directory for NEW projects. */}
         {uploadError ? <span className="composer-hint">{uploadError}</span> : null}
         {detailsRecord ? (
           <PluginDetailsModal
             record={detailsRecord}
+            workspaceContext={workspaceContext}
             onClose={() => setDetailsRecord(null)}
             onUse={async (record) => {
               inlineBackedPluginRef.current = null;
               await pluginsSectionRef.current?.applyById(record.id, record);
               setDetailsRecord(null);
             }}
+            onDuplicate={(record) => void duplicateDetailsPlugin(record)}
             hideUseAction
+          />
+        ) : null}
+        {detailsSkill ? (
+          <SkillDetailsModal
+            skillId={detailsSkill.id}
+            summary={detailsSkill.summary}
+            onClose={() => setDetailsSkill(null)}
+          />
+        ) : null}
+        {libraryPickerOpen ? (
+          <LibraryPicker
+            onClose={() => setLibraryPickerOpen(false)}
+            onConfirm={(assets) => addAssetsFromLibrary(assets)}
+          />
+        ) : null}
+        {figmaModalOpen && projectId ? (
+          <FigmaImportModal
+            onClose={() => setFigmaModalOpen(false)}
+            resolveProjectId={async () => projectId}
+            workspaceContext={workspaceContext}
+            onImported={(result) => {
+              // Prefill the composer with the reshape prompt; the user reviews
+              // and sends to build the page from the decoded snapshot.
+              setDraft(result.suggestedPrompt);
+              editorRef.current?.setText(result.suggestedPrompt);
+              editorRef.current?.focus();
+            }}
+            onFigmaUrl={(url, notes) => {
+              const prompt = `Migrate the Figma file at ${url} into a responsive webpage using its design system.${notes ? ` ${notes}` : ''}`;
+              setDraft(prompt);
+              editorRef.current?.setText(prompt);
+              editorRef.current?.focus();
+              setFigmaModalOpen(false);
+            }}
+          />
+        ) : null}
+        {figmaHelpOpen ? (
+          <FigmaHelpModal onClose={() => setFigmaHelpOpen(false)} />
+        ) : null}
+        {projectReferenceOpen ? (
+          <ProjectReferenceModal
+            currentProjectId={projectId}
+            workspaceContext={workspaceContext}
+            onClose={() => {
+              // Only the dismiss paths (X / backdrop / Escape / Cancel) land
+              // here — a confirmed pick closes via handleReferenceProjects,
+              // which reports 'success' / 'failed'.
+              trackContextLinkResult(analytics.track, {
+                page_name: 'chat_panel',
+                area: 'chat_composer',
+                context_kind: 'project',
+                result: 'cancelled',
+                ...(projectId ? { project_id: projectId } : {}),
+              });
+              setProjectReferenceOpen(false);
+            }}
+            onSelect={(items) => void handleReferenceProjects(items)}
           />
         ) : null}
       </div>
@@ -2674,6 +3613,31 @@ function isFiniteAttachmentOrder(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+// Upper bound on element markup folded into the composer input so a huge node's
+// outerHTML can't swamp the prompt; the screenshot still attaches in full.
+const MAX_ELEMENT_HTML_CHARS = 8000;
+
+/**
+ * Render a captured element's markup as a composer-input block: a one-line
+ * descriptor (selector + rendered size) followed by a fenced HTML code block.
+ * Used when an element-pick library asset is pulled into the chat so the user
+ * sees — and can edit — the element's HTML inline before sending.
+ */
+function formatElementHtmlBlock(
+  asset: LibraryAsset,
+  element: LibraryElementMeta,
+  html: string,
+): string {
+  const descriptor = element.selector || element.tag || assetTitle(asset);
+  const size = element.width && element.height ? ` · ${element.width}×${element.height}` : '';
+  const trimmed = html.trim();
+  const body =
+    trimmed.length > MAX_ELEMENT_HTML_CHARS
+      ? `${trimmed.slice(0, MAX_ELEMENT_HTML_CHARS)}\n<!-- …truncated -->`
+      : trimmed;
+  return `Captured element ${descriptor}${size}\n\n\`\`\`html\n${body}\n\`\`\``;
+}
+
 function normalizeChatAttachmentOrders(attachments: ChatAttachment[]): ChatAttachment[] {
   let fallbackOrder = 0;
   return attachments.map((attachment) => {
@@ -2729,9 +3693,22 @@ function sortChatCommentAttachmentsByOrder(attachments: ChatCommentAttachment[])
     .map((entry) => entry.attachment);
 }
 
+/* 5×5 dot-matrix "cross expand" glyph shown inside the black send button while
+   a run is executing: a plus shape blooms outward from the center in Manhattan
+   steps (delay = 220ms × Manhattan distance from the middle dot); the faint
+   base grid stays static. Dots use currentColor so the glyph adapts to the
+   button's light-on-dark (and dark-mode inverted) fill. */
+function ComposerRunIcon({ className }: { className?: string }) {
+  // Self-animating matrix loader (SMIL inside the SVG); runs on its own as an
+  // <img>, so it needs none of the <video> autoplay/loop plumbing.
+  return <img className={className} src="/composer-matrix-loader.svg" alt="" aria-hidden />;
+}
+
 function workspaceContextIcon(item: WorkspaceContextItem): IconName {
   if (item.kind === 'browser') return 'globe';
   if (item.kind === 'folder' || item.kind === 'design-files') return 'folder';
+  if (item.kind === 'project') return 'folder';
+  if (item.kind === 'local-code') return 'terminal';
   if (item.kind === 'terminal') return 'terminal';
   if (item.kind === 'side-chat') return 'comment';
   if (item.kind === 'design-system') return 'blocks';
@@ -2750,6 +3727,8 @@ function workspaceContextTitle(item: WorkspaceContextItem): string {
 
 function workspaceContextDescription(item: WorkspaceContextItem): string {
   if (item.kind === 'design-files') return item.path || 'Project files';
+  if (item.kind === 'project') return item.absolutePath || item.path || item.title || item.id;
+  if (item.kind === 'local-code') return item.absolutePath || item.path || item.title || item.id;
   if (item.kind === 'terminal') return item.title || 'Terminal session';
   return item.url || item.path || item.absolutePath || item.title || item.tabId || item.id;
 }
@@ -2792,6 +3771,10 @@ function workspaceContextKindLabel(kind: WorkspaceContextItem['kind']): string {
       return 'Design system';
     case 'folder':
       return 'Folder';
+    case 'project':
+      return 'Project';
+    case 'local-code':
+      return 'Local code';
     case 'terminal':
       return 'Terminal';
     case 'side-chat':
@@ -2821,6 +3804,7 @@ function StagedRunContexts({
   onRemoveAttachment,
   onRemovePlugin,
   onPluginDetails,
+  onSkillDetails,
   t,
 }: {
   designSystemPicker?: ReactNode;
@@ -2839,14 +3823,18 @@ function StagedRunContexts({
   onRemoveAttachment: (path: string) => void;
   onRemovePlugin?: () => void;
   onPluginDetails?: (id: string) => void;
+  onSkillDetails?: (id: string) => void;
   t: TranslateFn;
 }) {
+  const { workspaceContext } = useProjectCollabContext();
   // Attachment thumbnails preview in a portal modal; keep that state here so the
   // file chips can live in the same wrap row as the design-system picker and
   // other run-context chips (so files flow to the picker's right, wrapping to a
   // new line only when the row fills) instead of forcing a separate row below.
   const [preview, setPreview] = useState<ChatAttachment | null>(null);
-  const previewUrl = preview && projectId ? projectRawUrl(projectId, preview.path) : null;
+  const previewUrl = preview && projectId
+    ? projectRawUrl(projectId, preview.path, workspaceContext)
+    : null;
   useEffect(() => {
     if (!preview) return;
     function onKey(e: KeyboardEvent) {
@@ -2931,12 +3919,15 @@ function StagedRunContexts({
           key={s.id}
           className={`staged-chip staged-context staged-context--skill staged-skill-${s.source ?? 'built-in'}`}
         >
-          <span className="staged-icon" aria-hidden>
-            <Icon name="sparkles" size={12} />
-          </span>
-          <span className="staged-name" title={s.description || s.name}>
-            @{s.name}
-          </span>
+          <button
+            type="button"
+            className="staged-context-open"
+            onClick={() => onSkillDetails?.(s.id)}
+            title={s.description || s.name}
+            aria-label={s.name}
+          >
+            <span className="staged-name">@{s.name}</span>
+          </button>
           <button
             type="button"
             className="staged-remove od-tooltip"
@@ -3000,22 +3991,28 @@ function StagedRunContexts({
       ))}
       {attachments.map((a, index) => {
         const canPreview = a.kind === 'image' && Boolean(projectId);
-        const imageUrl = canPreview ? projectRawUrl(projectId!, a.path) : null;
+        const imageUrl = canPreview
+          ? projectRawUrl(projectId!, a.path, workspaceContext)
+          : null;
         return (
-          <div key={a.path} className={`staged-chip staged-${a.kind}`}>
+          <div
+            key={a.path}
+            className={`staged-chip staged-${a.kind}${canPreview && imageUrl ? ' staged-chip--image-file' : ''}`}
+          >
             <span className="staged-order" aria-label={`Attachment ${index + 1}`}>
               {index + 1}
             </span>
             {canPreview && imageUrl ? (
+              // Mirrors the home composer's image chips: thumbnail only, the
+              // filename lives in the tooltip / aria-label.
               <button
                 type="button"
                 className="staged-preview-trigger"
                 onClick={() => setPreview(a)}
-                title={a.path}
+                title={a.name}
                 aria-label={`Preview ${a.name}`}
               >
                 <img src={imageUrl} alt="" aria-hidden />
-                <span className="staged-name">{a.name}</span>
               </button>
             ) : (
               <>
@@ -3108,6 +4105,97 @@ function StagedCommentAttachments({
           </button>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * The 插件 quick pill's standalone popover content. Reuses the "+" menu
+ * plugins-flyout structure verbatim (plus-menu__plugin-pane: search + list
+ * column + hover preview column) so the surface keeps the exact look it had
+ * as a menu flyout — ToolsPluginsPanel's composer-tools-* layout collided
+ * with the plus-menu popup container.
+ */
+function StandalonePluginsPane({
+  plugins,
+  onPick,
+  onAdd,
+  workspaceContext,
+}: {
+  plugins: InstalledPluginRecord[];
+  onPick: (record: InstalledPluginRecord) => void;
+  onAdd?: () => void;
+  workspaceContext: WorkspaceCollabContext | null;
+}) {
+  const { locale, t } = useI18n();
+  const [query, setQuery] = useState('');
+  const [hoveredPluginId, setHoveredPluginId] = useState<string | null>(null);
+  const filteredPlugins = useMemo(
+    () => plugins.filter((p) => pluginMatchesQuery(p, query)),
+    [plugins, query],
+  );
+  // Mirror the "+" menu flyout: default the preview to the first filtered row
+  // so the panel is never blank while open.
+  const hoveredPlugin =
+    filteredPlugins.find((p) => p.id === hoveredPluginId) ?? filteredPlugins[0] ?? null;
+
+  return (
+    <div className="plus-menu__plugin-pane">
+      <div className="plus-menu__plugin-main">
+        <div className="plus-menu__search">
+          <Icon name="search" size={14} />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t('entry.navPlugins')}
+            aria-label={t('entry.navPlugins')}
+          />
+        </div>
+        <div className="plus-menu__list">
+          {filteredPlugins.length === 0 ? (
+            <div className="plus-menu__empty">{t('homeHero.noPlugins')}</div>
+          ) : (
+            filteredPlugins.map((plugin) => (
+              <button
+                key={plugin.id}
+                type="button"
+                role="menuitem"
+                className={`plus-menu__item${
+                  plugin.id === hoveredPlugin?.id ? ' is-previewed' : ''
+                }`}
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setHoveredPluginId(plugin.id)}
+                onFocus={() => setHoveredPluginId(plugin.id)}
+                onClick={() => onPick(plugin)}
+              >
+                <Icon name="sparkles" size={15} className="plus-menu__item-icon" />
+                <span>{localizePluginTitle(locale, plugin)}</span>
+              </button>
+            ))
+          )}
+        </div>
+        {onAdd ? (
+          <>
+            <div className="plus-menu__divider" />
+            <button
+              type="button"
+              role="menuitem"
+              className="plus-menu__item"
+              onClick={onAdd}
+            >
+              <Icon name="plus" size={15} className="plus-menu__item-icon" />
+              <span>{t('homeHero.addPlugin')}</span>
+            </button>
+          </>
+        ) : null}
+      </div>
+      {hoveredPlugin ? (
+        <ComposerPluginPreview
+          record={hoveredPlugin}
+          locale={locale}
+          workspaceContext={workspaceContext}
+        />
+      ) : null}
     </div>
   );
 }
@@ -3365,6 +4453,7 @@ function DesignToolboxPanel({
   onPickSkill,
   onPickResource,
   onOpened,
+  workspaceContext,
 }: {
   actions: DesignToolboxAction[];
   skills: SkillSummary[];
@@ -3382,6 +4471,7 @@ function DesignToolboxPanel({
   onPickSkill: (skill: SkillSummary) => void;
   onPickResource: (resource: DesignToolboxResource) => void;
   onOpened?: () => void;
+  workspaceContext: WorkspaceCollabContext | null;
 }) {
   const { locale, t } = useI18n();
   const [query, setQuery] = useState('');
@@ -3558,7 +4648,11 @@ function DesignToolboxPanel({
                   // sandboxed example iframe + meta); every other kind keeps
                   // the compact text detail since it has no preview asset.
                   resource.kind === 'plugin' ? (
-                    <ComposerPluginPreview record={resource.plugin} locale={locale} />
+                    <ComposerPluginPreview
+                      record={resource.plugin}
+                      locale={locale}
+                      workspaceContext={workspaceContext}
+                    />
                   ) : (
                     <>
                       <div className="plus-menu__detail-title">{resource.title}</div>
@@ -3648,7 +4742,7 @@ function ToolboxItemRow({
         onMouseDown={(e) => e.preventDefault()}
         onClick={onPick}
       >
-        <Icon name={icon} size={15} className="plus-menu__item-icon" />
+        <Icon name={icon} size={14} className="plus-menu__item-icon" />
         <span>{name}</span>
       </button>
     </div>
@@ -4028,6 +5122,19 @@ function isDesignToolboxSkill(skill: SkillSummary): boolean {
     'anti slop',
     'anti ai',
     'image',
+    'asset',
+    'reference',
+    'icon',
+    'logo',
+    'chart',
+    'diagram',
+    'echarts',
+    'three',
+    'spline',
+    'rive',
+    'lottie',
+    'mapbox',
+    'deck.gl',
     'video',
     'frontend',
     'beautify',
@@ -4104,6 +5211,8 @@ function designToolboxWorkspaceKindLabel(
     case 'design-system':
       return t('chat.designToolbox.context.designSystem');
     case 'folder':
+    case 'project':
+    case 'local-code':
       return t('chat.designToolbox.context.folder');
     case 'terminal':
       return t('chat.designToolbox.context.terminal');
@@ -4154,6 +5263,26 @@ function designToolboxActionPrompt({
         t('chat.designToolbox.prompt.autoMatchStep3'),
         t('chat.designToolbox.prompt.autoMatchStep4'),
       ].join('\n');
+    case 'asset-search':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.assetSearch'),
+      ].join('\n');
+    case 'icon-workflow':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.iconWorkflow'),
+      ].join('\n');
+    case 'image-replace':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.imageReplace'),
+      ].join('\n');
+    case 'reference-extract':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.referenceExtract'),
+      ].join('\n');
     case 'motion':
       return [
         ...base,
@@ -4163,6 +5292,21 @@ function designToolboxActionPrompt({
       return [
         ...base,
         t('chat.designToolbox.prompt.motionPolish'),
+      ].join('\n');
+    case 'transition-motion':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.transitionMotion'),
+      ].join('\n');
+    case 'plan-outline':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.planOutline'),
+      ].join('\n');
+    case 'threejs-scene':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.threejsScene'),
       ].join('\n');
     case 'anti-ai-polish':
       return [
@@ -4179,12 +5323,27 @@ function designToolboxActionPrompt({
         ...base,
         t('chat.designToolbox.prompt.imageGen'),
       ].join('\n');
+    case 'chart-gen':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.chartGen'),
+      ].join('\n');
+    case 'logo-gen':
+      return [
+        ...base,
+        t('chat.designToolbox.prompt.logoGen'),
+      ].join('\n');
     case 'video-gen':
       return [
         ...base,
         t('chat.designToolbox.prompt.videoGen'),
       ].join('\n');
   }
+
+  return [
+    ...base,
+    t('chat.designToolbox.prompt.autoMatchIntro'),
+  ].join('\n');
 }
 
 function designToolboxSkillPrompt({
@@ -4519,7 +5678,7 @@ function MentionPopover({
   tab,
   onTabChange,
   activeIndex,
-  currentSkillId,
+  stagedSkillIds,
   onPickFile,
   onPickWorkspaceContext,
   onPickPlugin,
@@ -4537,7 +5696,7 @@ function MentionPopover({
   tab: MentionTab;
   onTabChange: (tab: MentionTab) => void;
   activeIndex: number;
-  currentSkillId: string | null;
+  stagedSkillIds: Set<string>;
   onPickFile: (path: string) => void;
   onPickWorkspaceContext: (item: WorkspaceContextItem) => void;
   onPickPlugin: (record: InstalledPluginRecord) => void;
@@ -4707,7 +5866,7 @@ function MentionPopover({
               const flat = optionIndex;
               optionIndex += 1;
               const rowActive = flat === activeIndex;
-              const isCurrent = skill.id === currentSkillId;
+              const isStaged = stagedSkillIds.has(skill.id);
               return (
                 <button
                   key={`skill-${skill.id}`}
@@ -4720,14 +5879,14 @@ function MentionPopover({
                   onClick={() => onPickSkill(skill)}
                   title={localizeSkillDescription(locale, skill)}
                 >
-                  <Icon name={isCurrent ? 'check' : 'file'} size={12} />
+                  <Icon name={isStaged ? 'check' : 'file'} size={12} />
                   <span className="mention-item-body">
                     <strong>{localizeSkillName(locale, skill)}</strong>
                     <span className="mention-meta mention-meta--desc">
                       {localizeSkillDescription(locale, skill) || skill.id}
                     </span>
                   </span>
-                  <span className="mention-meta mention-item-kind">{isCurrent ? t('chat.mentionActiveSkill') : skill.mode}</span>
+                  <span className="mention-meta mention-item-kind">{isStaged ? t('chat.mentionActiveSkill') : skill.mode}</span>
                 </button>
               );
             })}

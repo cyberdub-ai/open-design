@@ -2,13 +2,14 @@
 /*
  * /agents/aider-design/ — agent detail page (industrial long-form).
  *
- * Captures "aider design" intent and drives to Open Design. Renders the
+ * Captures "aider design" intent and drives to OpenDesign. Renders the
  * rich how-to layout from copy.agentGuides['aider'].rich. Linked from /agents/.
  * Never fabricate URLs or facts here.
  */
 import Layout from '../../../_components/sub-page-layout.astro';
 import { getInfoPageCopy } from '../../../info-page-i18n';
 import { localeFromPath, localizedHref } from '../../../i18n';
+import { downloadFirstCtas } from '../../../cta-actions';
 
 const SLUG = 'aider';
 const ROUTE = 'aider-design';
@@ -22,6 +23,10 @@ const common = copy.common;
 // Compact locales fall back to the English guide rather than crash on undefined.
 const page = copy.agentGuides[SLUG] ?? getInfoPageCopy('en').agentGuides[SLUG]!;
 const rich = page.rich;
+
+// Lead the CTAs with the desktop download (drop the get-started action).
+const heroCtas = rich ? downloadFirstCtas(rich.heroCtaActions) : [];
+const finalCtas = rich ? downloadFirstCtas(rich.ctaActions) : [];
 
 // Localize CTA action hrefs while leaving external links untouched.
 const ctaHref = (a: { href: string; external?: boolean }) =>
@@ -40,15 +45,15 @@ const jsonLd = [
     '@context': 'https://schema.org',
     '@type': 'BreadcrumbList',
     itemListElement: [
-      { '@type': 'ListItem', position: 1, name: 'Open Design', item: homeUrl },
+      { '@type': 'ListItem', position: 1, name: 'OpenDesign', item: homeUrl },
       { '@type': 'ListItem', position: 2, name: copy.agents.breadcrumb, item: agentsHubUrl },
       { '@type': 'ListItem', position: 3, name: page.breadcrumb, item: pageUrl },
     ],
   },
   {
     '@context': 'https://schema.org',
-    '@type': 'Article',
-    headline: page.title,
+    '@type': 'WebPage',
+    name: page.title,
     description: page.description,
     url: pageUrl,
     isPartOf: { '@id': `${SITE}#website` },
@@ -67,7 +72,7 @@ const jsonLd = [
 
 <Layout title={page.title} description={page.description} active="agent" jsonLd={jsonLd}>
   <nav class="breadcrumb" aria-label={common.breadcrumbAria}>
-    <a href={href('/')}>Open Design</a>
+    <a href={href('/')}>OpenDesign</a>
     <span>/</span>
     <a href={href('/agents/')}>{copy.agents.breadcrumb}</a>
     <span>/</span>
@@ -84,7 +89,7 @@ const jsonLd = [
           <h1 class="display">{page.heading}</h1>
           <p class="lead">{page.lead}</p>
           <div class="solution-hero-cta">
-            {rich.heroCtaActions.map((a) => (
+            {heroCtas.map((a) => (
               <a
                 class={`btn ${a.variant === 'primary' ? 'btn-primary' : 'btn-ghost'}`}
                 href={ctaHref(a)}
@@ -182,7 +187,7 @@ const jsonLd = [
             <p>{rich.ctaBody}</p>
           </div>
           <div class="info-cta-actions">
-            {rich.ctaActions.map((a) => (
+            {finalCtas.map((a) => (
               <a
                 class={`btn ${a.variant === 'primary' ? 'btn-primary' : 'btn-ghost'}`}
                 href={ctaHref(a)}
@@ -279,9 +284,8 @@ const jsonLd = [
             <p>{page.ctaBody}</p>
           </div>
           <div class="info-cta-actions">
-            <a class="btn btn-primary" href={REPO} target="_blank" rel="noreferrer noopener">{common.starOnGithub}</a>
-            <a class="btn btn-ghost" href={href('/quickstart/')}>{common.quickstart}</a>
-            <a class="btn btn-ghost" href={REPO_RELEASES} target="_blank" rel="noreferrer noopener">{common.downloadDesktop}</a>
+            <a class="btn btn-primary" href={href('/download/')}>{common.downloadDesktop}</a>
+            <a class="btn btn-ghost" href={REPO} target="_blank" rel="noreferrer noopener">{common.starOnGithub}</a>
           </div>
           <div class="info-cta-meta">
             <span class="stamp">● {common.apache}</span>

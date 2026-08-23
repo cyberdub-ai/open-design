@@ -5,6 +5,7 @@
  */
 import Layout from '../../../_components/sub-page-layout.astro';
 import LazyImg from '../../../_components/lazy-img.astro';
+import { getInfoPageCopy } from '../../../info-page-i18n';
 import { getTemplateRecords, type TemplateRecord } from '../../../_lib/catalog';
 import {
   getLandingUiCopy,
@@ -18,75 +19,75 @@ import {
  * just keyed for the templates surface. */
 type ShareTemplate = (vars: { name: string; description: string; url: string }) => string;
 const SHARE_COPY: Record<LandingLocaleCode, ShareTemplate> = {
-  en:      ({ name, description, url }) => `🎨 Just forked ${name} from @opendesignai — the open-source Claude Design alternative.
+  en:      ({ name, description, url }) => `🎨 Just forked ${name} from @OpenDesignHQ — the open-source Claude Design alternative.
 ✨ Templates as files, not vendor docs. Fork → swap → ship.
 
 → ${url}`,
-  zh:      ({ name, description, url }) => `🎨 fork 了一个：@opendesignai 上的 ${name} —— Claude Design 的开源替代品。
+  zh:      ({ name, description, url }) => `🎨 fork 了一个：@OpenDesignHQ 上的 ${name} —— Claude Design 的开源替代品。
 ✨ 模板就是文件，不是 vendor 数据。Fork → 换数据 → 发。
 
 → ${url}`,
-  'zh-tw': ({ name, description, url }) => `🎨 fork 了一個：@opendesignai 上的 ${name} —— Claude Design 的開源替代品。
+  'zh-tw': ({ name, description, url }) => `🎨 fork 了一個：@OpenDesignHQ 上的 ${name} —— Claude Design 的開源替代品。
 ✨ 模板就是檔案，不是 vendor 資料。Fork → 換資料 → 發佈。
 
 → ${url}`,
-  ja:      ({ name, description, url }) => `🎨 @opendesignai の ${name} を fork —— オープンソースの Claude Design 代替。
+  ja:      ({ name, description, url }) => `🎨 @OpenDesignHQ の ${name} を fork —— オープンソースの Claude Design 代替。
 ✨ テンプレートはファイル、ベンダー DB じゃない。Fork → 差し替え → 出荷。
 
 → ${url}`,
-  ko:      ({ name, description, url }) => `🎨 @opendesignai의 ${name} fork —— 오픈 소스 Claude Design 대안.
+  ko:      ({ name, description, url }) => `🎨 @OpenDesignHQ의 ${name} fork —— 오픈 소스 Claude Design 대안.
 ✨ 템플릿은 파일, 벤더 DB가 아닙니다. Fork → 교체 → 출시.
 
 → ${url}`,
-  de:      ({ name, description, url }) => `🎨 Gerade ${name} von @opendesignai geforkt — die Open-Source-Alternative zu Claude Design.
+  de:      ({ name, description, url }) => `🎨 Gerade ${name} von @OpenDesignHQ geforkt — die Open-Source-Alternative zu Claude Design.
 ✨ Vorlagen als Dateien, nicht als Vendor-DB. Fork → swap → ship.
 
 → ${url}`,
-  fr:      ({ name, description, url }) => `🎨 Je viens de forker ${name} de @opendesignai — l'alternative open-source à Claude Design.
+  fr:      ({ name, description, url }) => `🎨 Je viens de forker ${name} de @OpenDesignHQ — l'alternative open-source à Claude Design.
 ✨ Modèles = fichiers, pas une base vendeur. Fork → swap → ship.
 
 → ${url}`,
-  ru:      ({ name, description, url }) => `🎨 Форкнул ${name} с @opendesignai — open-source альтернативу Claude Design.
+  ru:      ({ name, description, url }) => `🎨 Форкнул ${name} с @OpenDesignHQ — open-source альтернативу Claude Design.
 ✨ Шаблоны — это файлы, не vendor-DB. Fork → swap → ship.
 
 → ${url}`,
-  es:      ({ name, description, url }) => `🎨 Acabo de hacer fork de ${name} en @opendesignai — la alternativa open-source a Claude Design.
+  es:      ({ name, description, url }) => `🎨 Acabo de hacer fork de ${name} en @OpenDesignHQ — la alternativa open-source a Claude Design.
 ✨ Plantillas como archivos, no como vendor DB. Fork → swap → ship.
 
 → ${url}`,
-  'pt-br': ({ name, description, url }) => `🎨 Acabei de dar fork em ${name} do @opendesignai — a alternativa open-source ao Claude Design.
+  'pt-br': ({ name, description, url }) => `🎨 Acabei de dar fork em ${name} do @OpenDesignHQ — a alternativa open-source ao Claude Design.
 ✨ Templates como arquivos, não como vendor DB. Fork → swap → ship.
 
 → ${url}`,
-  it:      ({ name, description, url }) => `🎨 Ho appena forkato ${name} da @opendesignai — l'alternativa open-source a Claude Design.
+  it:      ({ name, description, url }) => `🎨 Ho appena forkato ${name} da @OpenDesignHQ — l'alternativa open-source a Claude Design.
 ✨ Template come file, non come DB vendor. Fork → swap → ship.
 
 → ${url}`,
-  vi:      ({ name, description, url }) => `🎨 Vừa fork ${name} từ @opendesignai — giải pháp mã nguồn mở thay thế Claude Design.
+  vi:      ({ name, description, url }) => `🎨 Vừa fork ${name} từ @OpenDesignHQ — giải pháp mã nguồn mở thay thế Claude Design.
 ✨ Template là file, không phải DB của vendor. Fork → đổi data → ship.
 
 → ${url}`,
-  pl:      ({ name, description, url }) => `🎨 Właśnie sforkowałem ${name} z @opendesignai — open-source'ową alternatywę dla Claude Design.
+  pl:      ({ name, description, url }) => `🎨 Właśnie sforkowałem ${name} z @OpenDesignHQ — open-source'ową alternatywę dla Claude Design.
 ✨ Szablony jako pliki, nie vendor DB. Fork → swap → ship.
 
 → ${url}`,
-  id:      ({ name, description, url }) => `🎨 Baru fork ${name} dari @opendesignai — alternatif open-source untuk Claude Design.
+  id:      ({ name, description, url }) => `🎨 Baru fork ${name} dari @OpenDesignHQ — alternatif open-source untuk Claude Design.
 ✨ Template itu file, bukan vendor DB. Fork → tukar data → ship.
 
 → ${url}`,
-  nl:      ({ name, description, url }) => `🎨 Net ${name} geforkt van @opendesignai — het open-source alternatief voor Claude Design.
+  nl:      ({ name, description, url }) => `🎨 Net ${name} geforkt van @OpenDesignHQ — het open-source alternatief voor Claude Design.
 ✨ Templates als bestanden, niet als vendor-DB. Fork → swap → ship.
 
 → ${url}`,
-  ar:      ({ name, description, url }) => `🎨 ‏fork للتو ${name} من @opendesignai — البديل مفتوح المصدر لـ Claude Design.
+  ar:      ({ name, description, url }) => `🎨 ‏fork للتو ${name} من @OpenDesignHQ — البديل مفتوح المصدر لـ Claude Design.
 ✨ القوالب ملفات، ليست قاعدة بيانات للمزوّد. Fork → swap → ship.
 
 → ${url}`,
-  tr:      ({ name, description, url }) => `🎨 ${name} fork'ladım (@opendesignai) — Claude Design'a açık kaynaklı alternatif.
+  tr:      ({ name, description, url }) => `🎨 ${name} fork'ladım (@OpenDesignHQ) — Claude Design'a açık kaynaklı alternatif.
 ✨ Şablonlar dosya, vendor DB değil. Fork → swap → ship.
 
 → ${url}`,
-  uk:      ({ name, description, url }) => `🎨 Форкнув ${name} з @opendesignai — open-source альтернативу Claude Design.
+  uk:      ({ name, description, url }) => `🎨 Форкнув ${name} з @OpenDesignHQ — open-source альтернативу Claude Design.
 ✨ Шаблони — це файли, а не vendor-DB. Fork → swap → ship.
 
 → ${url}`,
@@ -127,6 +128,7 @@ interface Props {
 const { template: routeTemplate } = Astro.props as Props;
 const locale = localeFromPath(Astro.url.pathname);
 const ui = getLandingUiCopy(locale);
+const common = getInfoPageCopy(locale).common;
 const href = (path: string) => localizedHref(path, locale);
 const localizedTemplates = locale === 'en' ? [] : await getTemplateRecords(locale);
 const template =
@@ -135,7 +137,10 @@ const template =
 const title = ui.catalog.templates.detailTitle(template.name);
 const description = template.summary;
 
-const templateUrl = `https://open-design.ai/templates/${template.slug}/`;
+// Keep the public/share URL aligned with the localized canonical emitted by
+// Layout. Localized template routes are real static pages, so sharing one must
+// not silently send the visitor back to the English route.
+const templateUrl = new URL(href(`/templates/${template.slug}/`), Astro.site).toString();
 const shareCopy = (SHARE_COPY[locale] ?? SHARE_COPY.en)({
   name: template.name,
   description: template.summary,
@@ -164,16 +169,16 @@ const jsonLd = {
   '@context': 'https://schema.org',
   '@type': 'BreadcrumbList',
   itemListElement: [
-    { '@type': 'ListItem', position: 1, name: 'Open Design', item: Astro.site?.toString() },
-    { '@type': 'ListItem', position: 2, name: ui.catalog.templates.detailLabel, item: new URL('/templates/', Astro.site).toString() },
-    { '@type': 'ListItem', position: 3, name: template.name, item: new URL(template.detailHref, Astro.site).toString() },
+    { '@type': 'ListItem', position: 1, name: 'OpenDesign', item: new URL(href('/'), Astro.site).toString() },
+    { '@type': 'ListItem', position: 2, name: ui.catalog.templates.detailLabel, item: new URL(href('/templates/'), Astro.site).toString() },
+    { '@type': 'ListItem', position: 3, name: template.name, item: templateUrl },
   ],
 };
 ---
 
 <Layout title={title} description={description} active="templates" jsonLd={jsonLd}>
   <nav class="breadcrumb" aria-label={ui.catalog.breadcrumbLabel}>
-    <a href={href('/')}>Open Design</a>
+    <a href={href('/')}>OpenDesign</a>
     <span>/</span>
     <a href={href('/templates/')}>{ui.catalog.templates.detailLabel}</a>
     <span>/</span>
@@ -211,18 +216,15 @@ const jsonLd = {
         </dl>
       )}
       <div class="detail-actions">
-        {/* Two CTAs matching skills/[slug]: "Use this template" sends
-            users to the OD desktop release page (install first, then
-            use the template); "Find on GitHub" deep-links to the
-            source folder. See skills/[slug].astro for the broader
-            rationale on the release-page pivot. */}
+        {/* The desktop app does not register a public template deep-link yet,
+            so do not promise one. Route through the localized download page
+            and retain the template slug in the URL for a future handoff. */}
         <a
           class="btn btn-primary"
-          href="https://github.com/nexu-io/open-design/releases"
-          target="_blank"
-          rel="noopener"
+          href={href(`/download/?template=${encodeURIComponent(template.slug)}`)}
+          data-template-intent={template.slug}
         >
-          Use this template →
+          {common.downloadDesktop} →
         </a>
         <a class="btn btn-ghost" href={template.source} target="_blank" rel="noopener">
           Find on GitHub →

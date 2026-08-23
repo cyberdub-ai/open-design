@@ -25,10 +25,17 @@ import { useAnalytics } from '../analytics/provider';
 import { trackAutomationsClick, trackPageView } from '../analytics/events';
 import {
   NewAutomationModal,
-  describeScheduleSummary,
   type AutomationTemplate,
   type AutomationTemplateKind,
 } from './NewAutomationModal';
+import { describeRoutineSchedule } from './routineScheduleLabels';
+import { useWorkspaceContext } from '../collab/useWorkspaceContext';
+import { listProjects } from '../state/projects';
+import {
+  workspaceIdentityCacheKey,
+  workspaceProjectHeaders,
+} from '../collab/workspace-identity';
+import type { WorkspaceCollabContext } from '@open-design/contracts';
 
 type ProjectSummary = { id: string; name: string };
 type TemplateFilter =
@@ -171,7 +178,7 @@ function templateFilters(t: TranslateFn): ReadonlyArray<{ id: TemplateFilter; la
 
 function scheduleStatusLabel(routine: Routine, t: TranslateFn): string {
   if (!routine.enabled) return t('automations.scheduleStatusPaused');
-  return describeScheduleSummary(routine.schedule);
+  return describeRoutineSchedule(routine.schedule, t, routine.nextRunAt);
 }
 
 function nextRunLabel(routine: Routine, t: TranslateFn): string {
@@ -358,9 +365,51 @@ function proposalActionLabel(action: AutomationEvolutionProposal['action'], t: T
   return t('automations.proposalActionPromote');
 }
 
+function mergeAutomationProposals(
+  current: AutomationEvolutionProposal[],
+  incoming: AutomationEvolutionProposal[],
+): AutomationEvolutionProposal[] {
+  const merged = new Map(current.map((proposal) => [proposal.id, proposal]));
+  for (const proposal of incoming) {
+    merged.set(proposal.id, proposal);
+  }
+  return Array.from(merged.values()).sort((a, b) => {
+    const bTime = Date.parse(b.createdAt);
+    const aTime = Date.parse(a.createdAt);
+    return (Number.isNaN(bTime) ? 0 : bTime) - (Number.isNaN(aTime) ? 0 : aTime);
+  });
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function TasksView({ skills = [], designTemplates = [], connectors = [] }: Props) {
   const t = useT();
   const analytics = useAnalytics();
+  // Attaches the same workspace identity headers project reads already carry,
+  // so the daemon's `GET /api/workspaces/:id/projects` returns the caller's
+  // team projects instead of falling back to the no-scope `GET /api/projects`
+  // catalog (spec 04 §10), which now only lists never-claimed projects.
+  // `useWorkspaceContext` is a coalesced read shared across the nav shell, so
+  // calling it again here does not fan out an extra fetch.
+  //
+  // `workspaceView: 'all'` below matters: this picker needs every project the
+  // caller can attach an automation to (own drafts AND team-shared), not just
+  // the `'drafts'` fallback `listProjects` otherwise defaults to when the view
+  // is omitted (that default is right for the Home "Drafts" tab, wrong here —
+  // see `workspaceProjectListViewForRoute` in App.tsx for the same per-surface
+  // view choice made project-browsing routes).
+  const { context: tasksWorkspaceContext } = useWorkspaceContext();
+  const tasksWorkspaceIdentity = workspaceIdentityCacheKey(tasksWorkspaceContext);
+  const routineHeaders = useMemo(
+    () => tasksWorkspaceContext
+      ? workspaceProjectHeaders(tasksWorkspaceContext)
+      : undefined,
+    // The identity contains every authority field placed on the wire.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [tasksWorkspaceIdentity],
+  );
   // P2 page_view page_name=automations. Ref-keyed so re-renders don't
   // double-fire while the user is on the page.
   const pageViewFiredRef = useState<{ fired: boolean }>(() => ({ fired: false }))[0];
@@ -411,7 +460,8 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
     [templates, templateFilter],
   );
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<{ proposalRefreshFailed: boolean }> => {
+    let proposalRefreshFailed = false;
     try {
       const templateRequest = fetch('/api/automation-templates')
         .then(async (res) => {
@@ -421,28 +471,26 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
         .catch(() => null);
       const proposalRequest = fetch('/api/automation-proposals?status=pending-review')
         .then(async (res) => {
-          if (!res.ok) return null;
+          if (!res.ok) {
+            proposalRefreshFailed = true;
+            return null;
+          }
           return (await res.json()) as AutomationEvolutionProposalListResponse;
         })
-        .catch(() => null);
-      const [rRes, pRes, tJson, proposalJson] = await Promise.all([
-        fetch('/api/routines'),
-        fetch('/api/projects'),
+        .catch(() => {
+          proposalRefreshFailed = true;
+          return null;
+        });
+      const [rRes, projectList, tJson, proposalJson] = await Promise.all([
+        fetch('/api/routines', routineHeaders ? { headers: routineHeaders } : undefined),
+        listProjects({ workspaceContext: tasksWorkspaceContext, workspaceView: 'all' }),
         templateRequest,
         proposalRequest,
       ]);
       if (!rRes.ok) throw new Error(`routines: ${rRes.status}`);
       const rJson = await rRes.json();
       setRoutines(rJson.routines ?? []);
-      if (pRes.ok) {
-        const pJson = await pRes.json();
-        setProjects(
-          (pJson.projects ?? []).map((p: ProjectSummary) => ({
-            id: p.id,
-            name: p.name,
-          })),
-        );
-      }
+      setProjects(projectList.map((p) => ({ id: p.id, name: p.name })));
       if (tJson) {
         setAutomationCatalog(Array.isArray(tJson.templates) ? tJson.templates : []);
       }
@@ -451,11 +499,19 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
       }
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, []);
+    return { proposalRefreshFailed };
+    // Re-run (and re-effect below, via the `refresh` identity change) on
+    // workspace switch, not just mount — same as PluginsView/RoutinesSection —
+    // so the project picker reflects the newly active workspace's projects.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // `tasksWorkspaceIdentity` partitions this callback on every authority
+    // field. The captured context belongs to that exact identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routineHeaders, tasksWorkspaceIdentity]);
 
   useEffect(() => {
     void refresh();
@@ -499,7 +555,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
       }
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setProposalBusyId(null);
     }
@@ -509,7 +565,10 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
     setBusyId(id);
     setError(null);
     try {
-      const res = await fetch(`/api/routines/${id}/run`, { method: 'POST' });
+      const res = await fetch(`/api/routines/${id}/run`, {
+        method: 'POST',
+        ...(routineHeaders ? { headers: routineHeaders } : {}),
+      });
       if (!res.ok && res.status !== 202) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || `run failed: ${res.status}`);
@@ -528,7 +587,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
       setExpandedId(id);
       setHistoryTick((tick) => tick + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setBusyId(null);
     }
@@ -540,14 +599,29 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
     try {
       const res = await fetch(`/api/routines/${routineId}/runs/${runId}/crystallize`, {
         method: 'POST',
+        ...(routineHeaders ? { headers: routineHeaders } : {}),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || `crystallize failed: ${res.status}`);
       }
-      await refresh();
+      const json = (await res.json()) as RoutineRunCrystallizeResponse;
+      const createdProposals = Array.isArray(json.proposals) ? json.proposals : [];
+      if (createdProposals.length > 0) {
+        setProposals((current) => mergeAutomationProposals(current, createdProposals));
+      }
+      const { proposalRefreshFailed } = await refresh();
+      if (proposalRefreshFailed) {
+        setError(
+          createdProposals.length > 0
+            ? t('automations.crystallizePartialSuccess')
+            : t('automations.crystallizeRefreshFailed'),
+        );
+      } else if (createdProposals.length === 0) {
+        setError(t('automations.crystallizeNoProposals'));
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(t('automations.crystallizeFailed', { error: errorMessage(err) }));
     } finally {
       setCrystallizingRunId(null);
     }
@@ -558,7 +632,10 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
     try {
       const res = await fetch(`/api/routines/${routine.id}`, {
         method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          ...(routineHeaders ?? {}),
+        },
         body: JSON.stringify({ enabled: !routine.enabled }),
       });
       if (!res.ok) {
@@ -567,7 +644,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
       }
       void refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setBusyId(null);
     }
@@ -578,7 +655,10 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
       return;
     setBusyId(id);
     try {
-      const res = await fetch(`/api/routines/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/routines/${id}`, {
+        method: 'DELETE',
+        ...(routineHeaders ? { headers: routineHeaders } : {}),
+      });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
         throw new Error(j.error || `delete failed: ${res.status}`);
@@ -586,7 +666,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
       if (expandedId === id) setExpandedId(null);
       void refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setBusyId(null);
     }
@@ -723,7 +803,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
                       disabled={isBusy}
                       title={t('automations.runNowTitle')}
                     >
-                      <Icon name="play" size={12} />
+                      <Icon name="play" size={14} />
                       <span>{t('automations.run')}</span>
                     </button>
                     <button
@@ -736,7 +816,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
                       }}
                       aria-expanded={isExpanded}
                     >
-                      <Icon name="history" size={12} />
+                      <Icon name="history" size={14} />
                       <span>{isExpanded ? t('automations.hideHistory') : t('automations.history')}</span>
                     </button>
                     <button
@@ -748,7 +828,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
                       }}
                       disabled={isBusy}
                     >
-                      <Icon name="edit" size={12} />
+                      <Icon name="edit" size={14} />
                       <span>{t('automations.edit')}</span>
                     </button>
                     <button
@@ -773,13 +853,14 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
                       aria-label={t('automations.deleteAria')}
                       title={t('automations.deleteTitle')}
                     >
-                      <Icon name="trash" size={12} />
+                      <Icon name="trash" size={14} />
                     </button>
                   </div>
                   {isExpanded ? (
                     <AutomationRunHistory
                       routineId={r.id}
                       refreshKey={historyTick}
+                      workspaceContext={tasksWorkspaceContext}
                       crystallizingRunId={crystallizingRunId}
                       onCrystallizeRun={crystallizeRun}
                       onFireClick={fireClick}
@@ -843,7 +924,7 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
                       }}
                       disabled={isBusy}
                     >
-                      <Icon name="check" size={12} />
+                      <Icon name="check" size={14} />
                       <span>{t('automations.apply')}</span>
                     </button>
                     <button
@@ -931,14 +1012,14 @@ export function TasksView({ skills = [], designTemplates = [], connectors = [] }
               </span>
               <span className="automation-template-card__body">
                 <span className="automation-template-card__kicker">
-                  <Icon name={kindIcon(template.kind)} size={11} />
+                  <Icon name={kindIcon(template.kind)} size={14} />
                   {kindLabel(template.kind, t)}
                 </span>
                 <span className="automation-template-card__title">{template.title}</span>
                 <span className="automation-template-card__desc">{template.description}</span>
                 <span className="automation-template-card__cta">
                   {t('automations.useTemplate')}
-                  <Icon name="chevron-right" size={12} />
+                  <Icon name="chevron-right" size={14} />
                 </span>
               </span>
             </button>
@@ -988,6 +1069,7 @@ function Metric({ label, value }: { label: string; value: number }) {
 function AutomationRunHistory({
   routineId,
   refreshKey,
+  workspaceContext,
   crystallizingRunId,
   onCrystallizeRun,
   onFireClick,
@@ -995,19 +1077,23 @@ function AutomationRunHistory({
 }: {
   routineId: string;
   refreshKey: number;
+  workspaceContext: WorkspaceCollabContext | null;
   crystallizingRunId: string | null;
   onCrystallizeRun: (routineId: string, runId: string) => void;
   onFireClick: (element: AutomationsClickProps['element']) => void;
   t: TranslateFn;
 }) {
   const [runs, setRuns] = useState<RoutineRun[] | null>(null);
+  const workspaceIdentity = workspaceIdentityCacheKey(workspaceContext);
 
   useEffect(() => {
     let cancelled = false;
     setRuns(null);
     void (async () => {
       try {
-        const res = await fetch(`/api/routines/${routineId}/runs?limit=10`);
+        const res = await fetch(`/api/routines/${routineId}/runs?limit=10`, workspaceContext
+          ? { headers: workspaceProjectHeaders(workspaceContext) }
+          : undefined);
         if (!res.ok) throw new Error(`runs: ${res.status}`);
         const json = await res.json();
         if (!cancelled) setRuns(json.runs ?? []);
@@ -1018,7 +1104,10 @@ function AutomationRunHistory({
     return () => {
       cancelled = true;
     };
-  }, [refreshKey, routineId]);
+    // The captured context is exact for this identity; object churn with the
+    // same authority must not restart the history request.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshKey, routineId, workspaceIdentity]);
 
   if (runs === null) {
     return <div className="automation-history automation-history--empty">{t('automations.runHistoryLoading')}</div>;
@@ -1065,7 +1154,7 @@ function AutomationRunHistory({
                   disabled={crystallizingRunId === run.id}
                   title={t('automations.crystallizeTitle')}
                 >
-                  <Icon name="sparkles" size={12} />
+                  <Icon name="sparkles" size={14} />
                   <span>{crystallizingRunId === run.id ? t('automations.crystallizing') : t('automations.crystallize')}</span>
                 </button>
               ) : null}
@@ -1083,7 +1172,7 @@ function AutomationRunHistory({
                 }}
               >
                 {t('automations.openConversation')}
-                <Icon name="chevron-right" size={12} />
+                <Icon name="chevron-right" size={14} />
               </button>
             </div>
           </li>

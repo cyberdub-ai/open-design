@@ -1,6 +1,7 @@
 export interface AgentModelPrefs {
   model?: string;
   reasoning?: string;
+  serviceTier?: string;
 }
 
 export type AgentCliEnvPrefs = Record<string, Record<string, string>>;
@@ -18,6 +19,16 @@ export interface OrbitConfigPrefs {
   time: string;
   /** Optional skill id from the examples gallery where scenario === "orbit". */
   templateSkillId?: string | null;
+  /**
+   * Workspace selected in the tab that configured Orbit. The daemon verifies
+   * this pair when saving and again before every unattended run.
+   */
+  workspaceScope?: AutomationWorkspaceScope | null;
+}
+
+export interface AutomationWorkspaceScope {
+  workspaceId: string;
+  workspaceMemberId: string;
 }
 
 export interface ProjectLocationPrefs {
@@ -46,6 +57,7 @@ export interface AppConfigPrefs {
    * re-popping the consent banner.
    */
   privacyDecisionAt?: number | null;
+  allowSilentUpdates?: boolean;
   orbit?: OrbitConfigPrefs;
   customInstructions?: string | null;
   /** External project library roots. The daemon adds its built-in .od/projects location at read time. */

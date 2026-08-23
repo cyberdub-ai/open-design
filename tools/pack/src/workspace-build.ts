@@ -8,6 +8,7 @@ import { hashPackageSourcePath } from "./package-source-hash.js";
 import { readRuntimeAppVersion, versionFamilyForAppVersion } from "./versions.js";
 
 const WORKSPACE_BUILD_PACKAGES = [
+  { directory: "packages/release", name: "@open-design/release" },
   { directory: "packages/components", name: "@open-design/components" },
   { directory: "packages/contracts", name: "@open-design/contracts" },
   { directory: "packages/registry-protocol", name: "@open-design/registry-protocol" },
@@ -20,6 +21,7 @@ const WORKSPACE_BUILD_PACKAGES = [
   { directory: "packages/agui-adapter", name: "@open-design/agui-adapter" },
   { directory: "packages/plugin-runtime", name: "@open-design/plugin-runtime" },
   { directory: "packages/diagnostics", name: "@open-design/diagnostics" },
+  { directory: "packages/dsh-runtime", name: "@open-design/dsh-runtime" },
   { directory: "apps/daemon", name: "@open-design/daemon" },
   { directory: "apps/web", name: "@open-design/web" },
   { directory: "apps/desktop", name: "@open-design/desktop" },
@@ -27,6 +29,7 @@ const WORKSPACE_BUILD_PACKAGES = [
 ] as const;
 
 const BUILD_COMMANDS = [
+  { args: ["--filter", "@open-design/release", "build"] },
   { args: ["--filter", "@open-design/components", "build"] },
   { args: ["--filter", "@open-design/contracts", "build"] },
   { args: ["--filter", "@open-design/registry-protocol", "build"] },
@@ -39,6 +42,7 @@ const BUILD_COMMANDS = [
   { args: ["--filter", "@open-design/agui-adapter", "build"] },
   { args: ["--filter", "@open-design/plugin-runtime", "build"] },
   { args: ["--filter", "@open-design/diagnostics", "build"] },
+  { args: ["--filter", "@open-design/dsh-runtime", "build"] },
   { args: ["--filter", "@open-design/daemon", "build"] },
   { args: ["--filter", "@open-design/web", "build"], env: ["OD_WEB_OUTPUT_MODE"] },
   { args: ["--filter", "@open-design/web", "build:sidecar"] },
@@ -98,7 +102,7 @@ async function createWorkspaceBuildCacheKey(config: ToolPackConfig): Promise<str
     packageManager: await readPackageManager(config.workspaceRoot),
     platform: config.platform,
     pnpmLock: await hashPath(join(config.workspaceRoot, "pnpm-lock.yaml")),
-    schemaVersion: 7,
+    schemaVersion: 8,
     webOutputMode: config.webOutputMode,
   });
 }
@@ -111,6 +115,8 @@ function workspaceBuildOutputFiles(config: ToolPackConfig): string[] {
   return [
     "packages/components/dist/index.mjs",
     "packages/components/dist/index.d.ts",
+    "packages/release/dist/index.mjs",
+    "packages/release/dist/index.d.ts",
     "packages/contracts/dist/index.mjs",
     "packages/contracts/dist/index.d.ts",
     "packages/registry-protocol/dist/index.mjs",
@@ -133,6 +139,8 @@ function workspaceBuildOutputFiles(config: ToolPackConfig): string[] {
     "packages/plugin-runtime/dist/index.d.ts",
     "packages/diagnostics/dist/index.mjs",
     "packages/diagnostics/dist/index.d.ts",
+    "packages/dsh-runtime/dist/index.js",
+    "packages/dsh-runtime/dist/types/index.d.ts",
     "apps/daemon/dist/cli.js",
     "apps/daemon/dist/cli.d.ts",
     "apps/daemon/dist/sidecar/index.js",
@@ -149,6 +157,7 @@ function workspaceBuildOutputFiles(config: ToolPackConfig): string[] {
 function workspaceBuildArtifacts(config: ToolPackConfig): WorkspaceBuildArtifact[] {
   const artifacts = [
     "packages/components/dist",
+    "packages/release/dist",
     "packages/contracts/dist",
     "packages/registry-protocol/dist",
     "packages/sidecar-proto/dist",
@@ -160,6 +169,7 @@ function workspaceBuildArtifacts(config: ToolPackConfig): WorkspaceBuildArtifact
     "packages/agui-adapter/dist",
     "packages/plugin-runtime/dist",
     "packages/diagnostics/dist",
+    "packages/dsh-runtime/dist",
     "apps/daemon/dist",
     "apps/web/dist",
     "apps/desktop/dist",
@@ -223,6 +233,14 @@ const WEB_STANDALONE_APP_NODE_MODULES = "apps/web/node_modules";
 // of the standalone tree and the audit aborts the packaged build.
 const STANDALONE_HOISTED_PEER_DEPS = ["react", "react-dom", "styled-jsx"];
 
+async function symlinkDirectoryForWorkspaceBuild(target: string, linkPath: string): Promise<void> {
+  if (process.platform === "win32") {
+    await symlink(target, linkPath, "junction");
+    return;
+  }
+  await symlink(relative(dirname(linkPath), target), linkPath, "dir");
+}
+
 async function hoistStandaloneNextPeerDeps(standaloneRoot: string): Promise<void> {
   const appNodeModules = join(standaloneRoot, WEB_STANDALONE_APP_NODE_MODULES);
   const pnpmRoot = join(standaloneRoot, "node_modules", ".pnpm");
@@ -250,12 +268,11 @@ async function hoistStandaloneNextPeerDeps(standaloneRoot: string): Promise<void
     if (!match) continue;
     const target = join(pnpmRoot, match, "node_modules", pkg);
     if (!(await pathExists(target))) continue;
-    const relativeTarget = relative(dirname(linkPath), target);
     // Idempotent re-run: drop any pre-existing entry (stale symlink
     // from a previous build with different react/react-dom versions)
     // before recreating, so repeated invocations don't EEXIST.
     if (existing) await unlink(linkPath).catch(() => undefined);
-    await symlink(relativeTarget, linkPath);
+    await symlinkDirectoryForWorkspaceBuild(target, linkPath);
   }
 }
 
@@ -294,7 +311,7 @@ export async function ensureWorkspaceBuildArtifacts(
   config: ToolPackConfig,
   cache: ToolPackCache,
   build: () => Promise<void>,
-): Promise<void> {
+): Promise<string> {
   const key = await createWorkspaceBuildCacheKey(config);
   const nodeId = `${config.platform}.workspace-build`;
   const artifacts = workspaceBuildArtifacts(config);
@@ -352,4 +369,5 @@ export async function ensureWorkspaceBuildArtifacts(
     },
     seedFrom: versionFamilyAlias == null ? [] : [{ aliasKey: versionFamilyAlias, materialize }],
   });
+  return key;
 }

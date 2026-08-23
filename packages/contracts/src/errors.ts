@@ -25,6 +25,7 @@ export const API_ERROR_CODES = [
   'AMR_MODEL_UNAVAILABLE',
   'AMR_AUTH_REQUIRED',
   'AMR_INSUFFICIENT_BALANCE',
+  'AMR_TIER_UPGRADE_REQUIRED',
   // The agent emitted a fabricated Markdown role marker
   // (`## user` / `## assistant` / `## system`) inside its own response.
   // The chat host parses those lowercase lines as real turn
@@ -37,6 +38,18 @@ export const API_ERROR_CODES = [
   // `server.ts::abortForRoleMarker` alongside the existing
   // `fabricated_role_marker` warning event. Retryable.
   'ROLE_MARKER_HALLUCINATION',
+  // The agent got stuck repeating failing tool calls (e.g. re-running the same
+  // Edit that errors "string not found", or the same shell command that keeps
+  // exiting non-zero) without making progress. The daemon's tool-loop guard
+  // (`tool-loop-guard.ts`) counts consecutive failures and repeats of the same
+  // failing action. Only emitted when OD_TOOL_LOOP_GUARD=halt is enabled: at
+  // the hard ceiling the guard terminates the run so the agent cannot grind
+  // through dozens more identical attempts. The default mode is `warn`, which
+  // only surfaces a heads-up `tool_loop` event and never emits this error. The
+  // caller should re-check the actual target (the file, the element, the
+  // command) before retrying rather than resubmitting the same turn.
+  // OD_TOOL_LOOP_GUARD accepts warn|halt|off. Retryable.
+  'TOOL_LOOP_DETECTED',
   // The selected runtime agent def (apps/daemon/src/runtimes/defs/*) has
   // a checked-in field that fails strict source-config validation — e.g.
   // a non-integer, NaN, Infinity, or negative `inactivityTimeoutMs`
@@ -46,6 +59,7 @@ export const API_ERROR_CODES = [
   // than silently disabling the agent-specific watchdog.
   'AGENT_RUNTIME_DEF_INVALID',
   'PROJECT_NOT_FOUND',
+  'PROJECT_MATERIALIZATION_PENDING',
   // Handoff (`POST /api/projects/:id/handoff`): the requested conversation
   // is not in the project, or has no messages to synthesize a handoff from.
   'CONVERSATION_NOT_FOUND',
@@ -105,6 +119,26 @@ export const API_ERROR_CODES = [
   'CONNECTOR_RATE_LIMITED',
   'CONNECTOR_OUTPUT_TOO_LARGE',
   'CONNECTOR_EXECUTION_FAILED',
+  // Team-edition copy red-line (AC-9). A frozen or deleted team resource
+  // (design system / plugin / skill) may not be copied out to a personal,
+  // editable copy — the escape hole that would let a downgraded team keep using
+  // frozen content. Enforced server-side by assertTeamResourceCopyAllowed
+  // (api/team-resources.ts) at every copy-out route; UI graying is not enough.
+  // Workspace-scoped project creation/import failures. These are public route
+  // errors shared by ordinary project creation, folder/ZIP import, Desktop
+  // host import, and Plugin Remix.
+  'WORKSPACE_CONTEXT_INCOMPLETE',
+  'WORKSPACE_PROJECT_PERMISSION_DENIED',
+  'WORKSPACE_AUTHORITY_UNAVAILABLE',
+  'WORKSPACE_RESOURCE_FROZEN',
+  'WORKSPACE_RESOURCE_DELETED',
+  // Moving a project into the team space was refused because the team hub
+  // already registers the project under a DIFFERENT member's ownership
+  // (vela `team_project_owner_conflict`). This is a permanent ownership
+  // conflict, not a transient failure: retrying cannot succeed until the
+  // registered owner unshares the project, so clients must not render it as
+  // a "try again later" error.
+  'TEAM_PROJECT_OWNER_CONFLICT',
   'INTERNAL_ERROR',
 ] as const;
 
