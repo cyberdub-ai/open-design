@@ -14097,7 +14097,7 @@ export async function startServer({
           // stderr / exit handlers.
           if (err && err.code !== 'EPIPE') throw err;
         }
-        run.stdinOpen = false;
+        run.stdinOpen = true;
       } else {
         // Split write + close so the boolean backpressure signal survives —
         // see writePromptAndEndStdin for why `end(chunk)` cannot report it.
