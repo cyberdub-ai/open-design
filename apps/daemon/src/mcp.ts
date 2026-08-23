@@ -677,6 +677,25 @@ export const TOOL_DEFS = [
     },
     annotations: { ...WRITE_ANNOTATIONS, title: 'Create OpenDesign project' },
   },
+  {
+    name: 'update_project',
+    description:
+      'Update OpenDesign project fields (rename, change skill/design-system, edit metadata). PATCH-style: only fields you pass are written. Returns the updated project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_ARG,
+        name: { type: 'string' },
+        skillId: { type: 'string' },
+        designSystemId: { type: 'string' },
+        pendingPrompt: { type: 'string' },
+        metadata: { type: 'object', additionalProperties: true },
+      },
+      required: ['project'],
+      additionalProperties: false,
+    },
+    annotations: { ...WRITE_ANNOTATIONS, idempotentHint: true, title: 'Update OpenDesign project' },
+  },
   // Discovery + generation. An external coding agent does NOT run a
   // skill itself — it commissions OpenDesign to, via start_run. The
   // daemon then spawns ITS OWN agent (Claude Code / API fallback /…)
@@ -2226,6 +2245,8 @@ async function handleMcpToolCall(
         return await deleteProject(baseUrl, args, headers);
       case 'create_project':
         return await createProject(baseUrl, args, headers);
+      case 'update_project':
+        return await updateProject(baseUrl, args, headers);
       case 'list_skills':
         return ok(await getJson<SkillsPayload>(`${baseUrl}/api/skills`));
       case 'list_plugins':
@@ -2384,6 +2405,22 @@ async function postJson<T>(
   return (await resp.json()) as T;
 }
 
+async function patchJson<T>(
+  url: string,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Promise<T> {
+  const resp = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body ?? {}),
+  });
+  if (!resp.ok) {
+    throw new Error(await formatDaemonError(resp, url));
+  }
+  return (await resp.json()) as T;
+}
+
 // Create an empty project to generate into. start_run needs an existing
 // project; without this an external agent could only work on projects
 // the user had already created in OpenDesign.
@@ -2422,6 +2459,36 @@ async function createProject(
     if (!headers || !String(err).includes('WORKSPACE_')) throw err;
     return ok(await postJson<JsonObject>(`${baseUrl}/api/projects`, body));
   }
+}
+
+// PATCH-style project edit. Only the fields the caller passes are sent,
+// so a rename never clobbers skillId/metadata. Workspace headers go
+// through because PATCH /api/projects/:id enforces a 'rename' mutation
+// check against the signed-in workspace.
+async function updateProject(
+  baseUrl: string,
+  args: McpArgs,
+  headers?: Record<string, string>,
+) {
+  const { id, resolved } = await resolveProjectArg(baseUrl, args.project, headers);
+  const patch: Record<string, unknown> = {};
+  if (typeof args.name === 'string') patch.name = args.name;
+  if (typeof args.skillId === 'string') patch.skillId = args.skillId;
+  if (typeof args.designSystemId === 'string') patch.designSystemId = args.designSystemId;
+  if (typeof args.pendingPrompt === 'string') patch.pendingPrompt = args.pendingPrompt;
+  if (args.metadata && typeof args.metadata === 'object') patch.metadata = args.metadata;
+  if (Object.keys(patch).length === 0) {
+    return errorResult('no fields to update; pass at least one of name/skillId/designSystemId/pendingPrompt/metadata.');
+  }
+  const data = await patchJson<JsonObject>(
+    `${baseUrl}/api/projects/${encodeURIComponent(id)}`,
+    patch,
+    headers ?? {},
+  );
+  // A rename invalidates every cached name->id lookup, including the
+  // workspace-scoped ones, so drop the whole entry rather than a key.
+  if (typeof patch.name === 'string') projectListCache = null;
+  return ok(withActiveEcho(data, null, resolved));
 }
 
 // Flatten daemon's plugin record into the few fields an external agent
