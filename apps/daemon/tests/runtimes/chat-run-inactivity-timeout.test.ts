@@ -23,6 +23,7 @@ import {
   resolveChatRunInactivityTimeoutMs,
 } from '../../src/server.js';
 import { amrAgentDef } from '../../src/runtimes/defs/amr.js';
+import { codexAgentDef } from '../../src/runtimes/defs/codex.js';
 import { copilotAgentDef } from '../../src/runtimes/defs/copilot.js';
 
 const ENV_KEY = 'OD_CHAT_RUN_INACTIVITY_TIMEOUT_MS';
@@ -214,6 +215,23 @@ describe('resolveChatRunFirstOutputTimeoutMs', () => {
 describe('copilotAgentDef.inactivityTimeoutMs', () => {
   it('ships a 30-minute inactivity hint so Copilot silent-thinking phases do not trip the default watchdog (#2467)', () => {
     expect(copilotAgentDef.inactivityTimeoutMs).toBe(THIRTY_MINUTES_MS);
+  });
+});
+
+// Fork behavior with no coverage until now: codex reasons for long stretches
+// without emitting a single stream event, so on the 10-minute default the
+// watchdog kills a healthy run as `stalled`. The hint is one line in a def
+// table, which is exactly the shape an upstream merge drops silently.
+describe('codexAgentDef.inactivityTimeoutMs', () => {
+  it('ships a 30-minute inactivity hint so long silent codex reasoning is not killed as stalled', () => {
+    expect(codexAgentDef.inactivityTimeoutMs).toBe(THIRTY_MINUTES_MS);
+  });
+
+  it('resolves to that hint through the same resolver the run path uses', () => {
+    delete process.env[ENV_KEY];
+    expect(resolveChatRunInactivityTimeoutMs(codexAgentDef.inactivityTimeoutMs)).toBe(
+      THIRTY_MINUTES_MS,
+    );
   });
 });
 
