@@ -69,20 +69,37 @@ export async function checkComponentsManifestExtraction(): Promise<boolean> {
   return true;
 }
 
-async function discoverBrandSources(): Promise<BrandSources[]> {
-  const entries = await readdir(designSystemsRoot, { withFileTypes: true });
+/**
+ * A directory under `design-systems/` is a manifest fixture only once it has
+ * been compiled, and "compiled" means both artifacts are present: `tokens.css`
+ * and `components.html`. A directory carrying neither is an authored source
+ * that was never compiled (or a local scratch brand outside git) and is not a
+ * design system this check owns. A directory carrying exactly one of the two is
+ * a broken compile and must fail loudly rather than be silently skipped.
+ */
+export async function discoverBrandSources(root: string = designSystemsRoot): Promise<BrandSources[]> {
+  const entries = await readdir(root, { withFileTypes: true });
   const sources: BrandSources[] = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory() || skippedDesignSystemDirectories.has(entry.name)) continue;
 
-    const brandRoot = path.join(designSystemsRoot, entry.name);
+    const brandRoot = path.join(root, entry.name);
     const tokensPath = path.join(brandRoot, 'tokens.css');
     const fixturePath = path.join(brandRoot, 'components.html');
     const [tokensCss, fixtureHtml] = await Promise.all([
-      readFile(tokensPath, 'utf8'),
-      readFile(fixturePath, 'utf8'),
+      readCompiledArtifact(tokensPath),
+      readCompiledArtifact(fixturePath),
     ]);
+
+    if (tokensCss === null && fixtureHtml === null) continue;
+    if (tokensCss === null || fixtureHtml === null) {
+      const missing = tokensCss === null ? tokensPath : fixturePath;
+      throw new Error(
+        `[${entry.name}] design system is half-compiled: ${toRepositoryPath(missing)} is missing while its counterpart exists.`,
+      );
+    }
+
     sources.push({
       id: entry.name,
       fixturePath,
@@ -92,6 +109,15 @@ async function discoverBrandSources(): Promise<BrandSources[]> {
   }
 
   return sources.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+async function readCompiledArtifact(filePath: string): Promise<string | null> {
+  try {
+    return await readFile(filePath, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return null;
+    throw err;
+  }
 }
 
 function toRepositoryPath(filePath: string): string {
