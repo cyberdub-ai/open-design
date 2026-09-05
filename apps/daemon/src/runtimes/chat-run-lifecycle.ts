@@ -287,3 +287,61 @@ export function writePromptAndEndStdin(
   stdin.end();
   return accepted === false;
 }
+
+export type ChildPromptStdin = {
+  write: (chunk: string, encoding: BufferEncoding, cb: (err?: Error | null) => void) => boolean;
+  end: () => void;
+};
+
+export type PromptStdinWriteResult = {
+  /** True when the chunk had to be buffered because the child is not draining stdin. */
+  stdinBackpressure: boolean;
+  /** True when the child can still receive further user messages on stdin. */
+  stdinOpen: boolean;
+};
+
+/**
+ * Writes the composed prompt to a child's stdin in the format its runtime
+ * declared, and reports whether stdin is still open afterwards.
+ *
+ * The invariant this helper exists to hold: a `'stream-json'` runtime must be
+ * left with stdin OPEN. claude-code reads further user messages until EOF, so
+ * closing stdin after the first message is what makes mid-turn input
+ * impossible. The plain-text branch immediately beside it writes and closes,
+ * which makes the difference invisible in a diff — an upstream merge has
+ * already resolved this conflict toward the closing shape once. Keeping both
+ * paths inside one named function is what gives that invariant a test.
+ *
+ * Every other runtime takes exactly one prompt and expects EOF right away.
+ */
+export function writeComposedPromptToChildStdin(
+  stdin: ChildPromptStdin,
+  composed: string,
+  promptInputFormat: 'text' | 'stream-json' | undefined,
+  onFlush: (err?: Error | null) => void,
+): PromptStdinWriteResult {
+  if (promptInputFormat !== 'stream-json') {
+    return {
+      stdinBackpressure: writePromptAndEndStdin(stdin, composed, onFlush),
+      stdinOpen: false,
+    };
+  }
+
+  const userMessage = JSON.stringify({
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [{ type: 'text', text: composed }],
+    },
+  });
+  try {
+    const accepted = stdin.write(`${userMessage}\n`, 'utf8', onFlush);
+    return { stdinBackpressure: accepted === false, stdinOpen: true };
+  } catch (err) {
+    // A child that exited before the write raises EPIPE and has already routed
+    // its failure through the stderr / exit handlers; a second error here would
+    // only bury the real one. A pipe that is gone cannot be backpressured.
+    if (err && (err as NodeJS.ErrnoException).code !== 'EPIPE') throw err;
+    return { stdinBackpressure: false, stdinOpen: true };
+  }
+}
