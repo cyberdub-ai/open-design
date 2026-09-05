@@ -4688,6 +4688,8 @@ export const pl: Dict = {
   'newproj.startFromLabel': 'Zacznij od',
   'newproj.startBlank': 'Pusty',
   'newproj.startBlankHint': 'Zacznij od zera',
+  'newproj.skillLabel': 'Umiejętność',
+  'newproj.skillAuto': '— automatycznie —',
   'workspace.pages': 'Strony',
   'workspace.allProjectFiles': 'Wszystkie pliki projektu',
   'workspace.newBlankPage': 'Nowa pusta strona',

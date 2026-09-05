@@ -4688,6 +4688,8 @@ export const ko: Dict = {
   'newproj.startFromLabel': '시작 방식',
   'newproj.startBlank': '빈 화면',
   'newproj.startBlankHint': '처음부터 만들기',
+  'newproj.skillLabel': '스킬',
+  'newproj.skillAuto': '— 자동 —',
   'workspace.pages': '페이지',
   'workspace.allProjectFiles': '프로젝트 전체 파일',
   'workspace.newBlankPage': '새 빈 페이지',

@@ -4688,6 +4688,8 @@ export const th: Dict = {
   'newproj.startFromLabel': 'เริ่มจาก',
   'newproj.startBlank': 'ว่างเปล่า',
   'newproj.startBlankHint': 'เริ่มจากศูนย์',
+  'newproj.skillLabel': 'สกิล',
+  'newproj.skillAuto': '— อัตโนมัติ —',
   'workspace.pages': 'หน้า',
   'workspace.allProjectFiles': 'ไฟล์โปรเจกต์ทั้งหมด',
   'workspace.newBlankPage': 'หน้าเปล่าใหม่',

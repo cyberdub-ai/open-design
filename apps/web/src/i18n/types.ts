@@ -4868,6 +4868,8 @@ export interface Dict {
   'newproj.startFromLabel': string;
   'newproj.startBlank': string;
   'newproj.startBlankHint': string;
+  'newproj.skillLabel': string;
+  'newproj.skillAuto': string;
   'workspace.pages': string;
   'workspace.allProjectFiles': string;
   'workspace.newBlankPage': string;

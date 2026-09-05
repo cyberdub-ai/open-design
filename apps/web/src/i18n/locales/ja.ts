@@ -4688,6 +4688,8 @@ export const ja: Dict = {
   'newproj.startFromLabel': '開始方法',
   'newproj.startBlank': '白紙',
   'newproj.startBlankHint': 'ゼロから作成',
+  'newproj.skillLabel': 'スキル',
+  'newproj.skillAuto': '— 自動 —',
   'workspace.pages': 'ページ',
   'workspace.allProjectFiles': 'プロジェクトの全ファイル',
   'workspace.newBlankPage': '新しい空白ページ',

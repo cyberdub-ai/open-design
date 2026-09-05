@@ -4688,6 +4688,8 @@ export const ru: Dict = {
   'newproj.startFromLabel': 'Начать с',
   'newproj.startBlank': 'Пустой',
   'newproj.startBlankHint': 'Начать с нуля',
+  'newproj.skillLabel': 'Скилл',
+  'newproj.skillAuto': '— авто —',
   'workspace.pages': 'Страницы',
   'workspace.allProjectFiles': 'Все файлы проекта',
   'workspace.newBlankPage': 'Новая пустая страница',

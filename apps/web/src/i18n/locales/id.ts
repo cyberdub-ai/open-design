@@ -4688,6 +4688,8 @@ export const id: Dict = {
   'newproj.startFromLabel': 'Mulai dari',
   'newproj.startBlank': 'Kosong',
   'newproj.startBlankHint': 'Mulai dari awal',
+  'newproj.skillLabel': 'Skill',
+  'newproj.skillAuto': '— otomatis —',
   'workspace.pages': 'Halaman',
   'workspace.allProjectFiles': 'Semua file proyek',
   'workspace.newBlankPage': 'Halaman kosong baru',

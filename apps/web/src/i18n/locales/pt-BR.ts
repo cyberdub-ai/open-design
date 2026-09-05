@@ -4688,6 +4688,8 @@ export const ptBR: Dict = {
   'newproj.startFromLabel': 'Começar de',
   'newproj.startBlank': 'Em branco',
   'newproj.startBlankHint': 'Começar do zero',
+  'newproj.skillLabel': 'Habilidade',
+  'newproj.skillAuto': '— automático —',
   'workspace.pages': 'Páginas',
   'workspace.allProjectFiles': 'Todos os arquivos do projeto',
   'workspace.newBlankPage': 'Nova página em branco',

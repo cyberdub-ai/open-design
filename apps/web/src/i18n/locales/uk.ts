@@ -4688,6 +4688,8 @@ export const uk: Dict = {
   'newproj.startFromLabel': 'Почати з',
   'newproj.startBlank': 'Порожній',
   'newproj.startBlankHint': 'Почати з нуля',
+  'newproj.skillLabel': 'Навичка',
+  'newproj.skillAuto': '— авто —',
   'workspace.pages': 'Сторінки',
   'workspace.allProjectFiles': 'Усі файли проєкту',
   'workspace.newBlankPage': 'Нова порожня сторінка',

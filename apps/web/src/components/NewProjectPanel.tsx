@@ -967,7 +967,7 @@ export function NewProjectPanel({
         {showSkillPicker && skillsForTab.length > 0 ? (
           <div className="newproj-section">
             <label className="newproj-label" htmlFor="newproj-skill-select">
-              Скилл
+              {t('newproj.skillLabel')}
             </label>
             <select
               id="newproj-skill-select"
@@ -975,7 +975,7 @@ export function NewProjectPanel({
               value={selectedSkillId ?? ''}
               onChange={(e) => setSelectedSkillId(e.target.value || null)}
             >
-              <option value="">— авто —</option>
+              <option value="">{t('newproj.skillAuto')}</option>
               {skillsForTab.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name}

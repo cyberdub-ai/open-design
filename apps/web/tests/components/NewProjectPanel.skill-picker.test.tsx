@@ -86,7 +86,7 @@ function renderPanel(onCreate = vi.fn()) {
 }
 
 function picker(): HTMLSelectElement {
-  return screen.getByRole('combobox', { name: /скилл/i }) as HTMLSelectElement;
+  return screen.getByRole('combobox', { name: /skill/i }) as HTMLSelectElement;
 }
 
 function createAs(name: string) {
@@ -152,6 +152,6 @@ describe('NewProjectPanel skill picker', () => {
     renderPanel();
     fireEvent.click(screen.getByTestId('new-project-tab-other'));
 
-    expect(screen.queryByRole('combobox', { name: /скилл/i })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: /skill/i })).toBeNull();
   });
 });

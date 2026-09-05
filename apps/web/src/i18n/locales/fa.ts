@@ -4683,6 +4683,8 @@ export const fa: Dict = {
   'newproj.startFromLabel': 'شروع از',
   'newproj.startBlank': 'خالی',
   'newproj.startBlankHint': 'شروع از صفر',
+  'newproj.skillLabel': 'مهارت',
+  'newproj.skillAuto': '— خودکار —',
   'workspace.pages': 'صفحه‌ها',
   'workspace.allProjectFiles': 'همه فایل‌های پروژه',
   'workspace.newBlankPage': 'صفحه خالی جدید',
