@@ -445,3 +445,58 @@ describe('MCP tool schema copy', () => {
     expect(gaps).toEqual([]);
   });
 });
+
+// An operator who exports OD_MCP_READONLY=1 is stating that this daemon must
+// not be mutated through MCP. Honouring that intent means two things, and a
+// tool list alone is only the first: the advertised tools must drop every
+// mutating entry, AND a call that arrives anyway — from a client with a cached
+// tool list, or a model guessing a name — must be refused rather than executed.
+// Membership is decided by each tool's own `readOnlyHint` annotation, not by a
+// name list, so a tool added by a future upstream merge is covered the moment
+// it declares itself.
+describe('MCP read-only deployments', () => {
+  it('advertises only read tools when OD_MCP_READONLY=1', async () => {
+    const { localMcpToolDefinitions } = await import('../src/mcp.js');
+
+    const readOnly = localMcpToolDefinitions({ OD_MCP_READONLY: '1' });
+    const mutating = readOnly.filter((tool) => tool.annotations.readOnlyHint !== true);
+
+    expect(mutating.map((tool) => tool.name)).toEqual([]);
+    expect(readOnly.map((tool) => tool.name)).toContain('list_projects');
+  });
+
+  it('advertises write tools by default', async () => {
+    const { localMcpToolDefinitions } = await import('../src/mcp.js');
+
+    expect(localMcpToolDefinitions({}).map((tool) => tool.name)).toContain('create_project');
+  });
+
+  it('refuses a write tool call that arrives while read-only', async () => {
+    vi.stubEnv('OD_MCP_READONLY', '1');
+    const calls: string[] = [];
+    globalThis.fetch = withDirectory(async (url: string) => {
+      calls.push(String(url));
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    const result = await handleMcpToolCall('http://127.0.0.1:1/', 'delete_project', {
+      project: 'demo',
+      confirm: true,
+    });
+
+    expect(firstText(result)).toMatch(/read-only/i);
+    expect(result.isError).toBe(true);
+    expect(calls.filter((url) => url.includes('/api/projects'))).toEqual([]);
+  });
+
+  it('still serves a read tool while read-only', async () => {
+    vi.stubEnv('OD_MCP_READONLY', '1');
+    globalThis.fetch = withDirectory(async () =>
+      new Response(JSON.stringify({ projects: [] }), { status: 200 }),
+    ) as typeof fetch;
+
+    const result = await handleMcpToolCall('http://127.0.0.1:2/', 'list_projects', {});
+
+    expect(result.isError).not.toBe(true);
+  });
+});

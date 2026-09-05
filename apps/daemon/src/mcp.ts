@@ -873,8 +873,36 @@ export const TOOL_DEFS = [
   },
 ];
 
-export function localMcpToolDefinitions() {
-  return TOOL_DEFS;
+/**
+ * `OD_MCP_READONLY=1` states that this daemon must not be mutated through MCP.
+ * A tool counts as mutating by its own `readOnlyHint` annotation rather than by
+ * appearing on a name list, so a tool landed by a future upstream merge is
+ * covered the moment it declares itself. Writes are enabled by default because
+ * the MCP server runs against the user's own local daemon - the same trust
+ * boundary as the OpenDesign UI itself.
+ */
+export function mcpWritesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.OD_MCP_READONLY !== '1';
+}
+
+export function localMcpToolDefinitions(env: NodeJS.ProcessEnv = process.env) {
+  if (mcpWritesEnabled(env)) return TOOL_DEFS;
+  return TOOL_DEFS.filter((tool) => tool.annotations.readOnlyHint === true);
+}
+
+/**
+ * Dropping mutating tools from `tools/list` only hides them. A call can still
+ * arrive from a client holding a cached list, or from a model guessing a name,
+ * so read-only enforcement has to live on the dispatch path too.
+ */
+function assertMcpToolWriteAllowed(nameValue: unknown): void {
+  if (mcpWritesEnabled()) return;
+  const name = String(nameValue);
+  const definition = TOOL_DEFS.find((tool) => tool.name === name);
+  if (!definition || definition.annotations.readOnlyHint === true) return;
+  throw pluginContractError(
+    `${name} mutates project state, and this OpenDesign MCP server runs read-only (OD_MCP_READONLY=1)`,
+  );
 }
 
 type RuntimeJsonSchema = {
@@ -1938,7 +1966,7 @@ export async function runMcpStdio(options: RunMcpOptions): Promise<void> {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, withMcpActivity(async () => ({
-    tools: TOOL_DEFS,
+    tools: localMcpToolDefinitions(),
   })));
 
   server.setRequestHandler(ListResourcesRequestSchema, withMcpActivity(async () => {
@@ -2084,6 +2112,7 @@ async function handleMcpToolCall(
   options: HandleMcpToolCallOptions = {},
 ): Promise<McpToolCallResult> {
   try {
+    assertMcpToolWriteAllowed(name);
     const workspaceContext = PROJECT_OR_RUN_TOOLS.has(String(name))
       ? await resolveMcpWorkspaceContext(baseUrl)
       : null;
