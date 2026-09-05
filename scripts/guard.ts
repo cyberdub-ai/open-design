@@ -976,6 +976,10 @@ const toolsRootAllowlist = new Map<string, "directory" | "file">([
   // Keep top-level tools intentionally small. `tools/launcher` was an incoming
   // Windows shim experiment from PR #683 and is not an active repo boundary.
   ["AGENTS.md", "file"],
+  // Fork-local content importer for `design-systems/` (styles.refero.design).
+  // It is a one-shot authoring utility, not a control plane, so it stays a
+  // single file rather than becoming a `tools/<name>/` workspace boundary.
+  ["import-refero-styles.py", "file"],
   ["dev", "directory"],
   ["pack", "directory"],
   ["release", "directory"],
