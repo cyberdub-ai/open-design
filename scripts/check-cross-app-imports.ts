@@ -329,6 +329,12 @@ export async function loadAppDirectoryRegistry(
     try {
       manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { name?: unknown };
     } catch (error) {
+      // A directory under apps/ becomes a registry entry only when it declares a
+      // manifest. An absent manifest means the directory is not an app at all --
+      // typically an untracked shell (node_modules, build scratch) left behind
+      // when an app was extracted out of the monorepo. A manifest that exists but
+      // cannot be read or parsed stays a hard failure: that is a broken app.
+      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") continue;
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to load app package manifest at ${manifestPath}: ${reason}`);
     }

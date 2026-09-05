@@ -240,3 +240,22 @@ test("app registry loading rejects parseable app manifests without a package nam
 
   await rm(appsRoot, { force: true, recursive: true });
 });
+
+test("app registry loading skips apps/ directories that declare no manifest", async () => {
+  const appsRoot = await mkdtemp(path.join(os.tmpdir(), "open-design-apps-"));
+  const realApp = path.join(appsRoot, "web");
+  const leftover = path.join(appsRoot, "telemetry-worker");
+
+  await mkdir(realApp);
+  await writeFile(path.join(realApp, "package.json"), JSON.stringify({ name: "@open-design/web" }), "utf8");
+  // A directory extracted out of the monorepo can leave an untracked node_modules
+  // shell behind. It declares no manifest, so it is not an app.
+  await mkdir(path.join(leftover, "node_modules"), { recursive: true });
+
+  const registry = await loadAppDirectoryRegistry(appsRoot);
+
+  assert.equal(registry.packageNameByDirectory.get("web"), "@open-design/web");
+  assert.equal(registry.packageNameByDirectory.has("telemetry-worker"), false);
+
+  await rm(appsRoot, { force: true, recursive: true });
+});
