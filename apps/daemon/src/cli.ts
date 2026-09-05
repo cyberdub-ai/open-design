@@ -255,7 +255,7 @@ const PROJECT_RESOURCE_STRING_FLAGS = new Set([
   'workspace',
   'workspace-member',
 ]);
-const PROJECT_BOOLEAN_FLAGS = new Set(['help', 'h', 'json', 'follow']);
+const PROJECT_BOOLEAN_FLAGS = new Set(['help', 'h', 'json', 'follow', 'skip-discovery']);
 const WORKSPACE_STRING_FLAGS = new Set([
   'daemon-url', 'workspace', 'view', 'visibility', 'owner', 'project',
   'member', 'role', 'email', 'app-user', 'lifecycle-state',
@@ -6874,7 +6874,12 @@ async function runProject(args) {
     console.log(`Usage:
   od project create [--name "<title>"] [--skill <id>] [--design-system <id>]
                     [--plugin <id>] [--inputs <json>] [--metadata-json <path|->]
-                    [--mode design|chat|plan]
+                    [--mode design|chat|plan] [--skip-discovery]
+                    --skip-discovery starts the project without the opening
+                    discovery brief: the agent treats the first message and the
+                    project metadata as the brief instead of waiting for
+                    answers. Intended for automated runs driven by another
+                    agent, where nobody is there to answer.
   od project create-design-system <id> [--name "<title>"]
                     [--prompt "<text>" | --prompt-file <path|->] [--json]
                     Duplicate a project as a design-system workspace and seed
@@ -7038,6 +7043,10 @@ Common options:
       };
       const conversationMode = normalizeChatSessionModeFlag(flags.mode);
       if (conversationMode) body.conversationMode = conversationMode;
+      // Only sent when asked for. An explicit `false` would still be a
+      // decision the daemon records, and the absent key is what "let the
+      // project decide as usual" means on this endpoint.
+      if (flags['skip-discovery']) body.skipDiscoveryBrief = true;
       if (flags['pending-prompt']) body.pendingPrompt = flags['pending-prompt'];
       if (flags['metadata-json']) {
         const mj = safeReadJsonFile(flags['metadata-json']);
