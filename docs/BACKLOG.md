@@ -32,15 +32,32 @@
 
 ## B. Живое поведение форка без единого теста
 
-4. `stdinOpen=true` (`apps/daemon/src/server.ts`) — логика `applyClaudeStreamJsonRunBookkeeping`
-   покрыта, но саму строку ничто не удерживает: разрешение конфликта уже перевело её в
-   `false` в 0.20.2. Нужен тест на наблюдаемый эффект, а не на константу.
-5. Тул `update_project`: PATCH, сброс `projectListCache` при переименовании, заголовки
-   воркспейса. Схема с 05.09 покрыта, поведение — нет.
-6. Локальный Ollama по умолчанию (`apps/daemon/src/memory-llm.ts`, `OLLAMA_HOST`) —
-   имени переменной нет ни в одном тесте демона.
-7. Сторож простоя codex 30 мин (`apps/daemon/src/runtimes/defs/codex.ts`, `inactivityTimeoutMs`).
-8. `OD_CLAUDE_STRICT_MCP` (`apps/daemon/src/runtimes/defs/claude.ts`).
+4. ~~`stdinOpen=true`~~ — ЗАКРЫТО 05.09, коммит `7192bdeac4`. Утверждать константу
+   `run.stdinOpen` было бы бесполезно: мерж, переразрешивший ветку, оставил бы тест зелёным.
+   Поэтому обе ветки записи промпта вынесены в именованную
+   `writeComposedPromptToChildStdin` (`apps/daemon/src/runtimes/chat-run-lifecycle.ts`),
+   а тесты утверждают наблюдаемый эффект: какие байты ушли в stdin и был ли вызван `end()`.
+   Поведение не менялось — JSONL-конверт, глотание EPIPE и учёт backpressure переехали как есть.
+   Проверено так: `pnpm exec vitest run tests/chat-run-stdin-prompt.test.ts` → 7 passed
+   (все 7 красные до появления хелпера).
+5. ~~Тул `update_project`~~ — ЗАКРЫТО 05.09, коммит `bb103125b1`. Четыре случая на границе
+   тула: в тело PATCH попадают только переданные поля; пустой патч отбивается без запроса;
+   переименование сбрасывает 5-секундный кэш списка проектов; не-переименование его хранит.
+   Проверено так: `pnpm exec vitest run tests/mcp-update-project.test.ts` → 4 passed; снятие
+   строки `projectListCache = null` из `mcp.ts` красит ровно тест про переименование
+   (мутационная проверка), после чего `mcp.ts` восстановлен байт-в-байт.
+6. ~~Локальный Ollama по умолчанию~~ — ЗАКРЫТО 05.09, коммит `2493a2a779`. `OLLAMA_HOST`
+   читается на загрузке модуля, поэтому тест грузит модули заново через `vi.resetModules()`
+   и утверждает URL, по которому `extractWithLLM` реально ходит.
+   Проверено так: `pnpm exec vitest run tests/memory-ollama-host.test.ts` → 2 passed.
+7. ~~Сторож простоя codex 30 мин~~ — ЗАКРЫТО 05.09, коммит `51bad8e521`. Утверждается и поле
+   `codexAgentDef.inactivityTimeoutMs`, и значение, которое отдаёт
+   `resolveChatRunInactivityTimeoutMs` — тот же резолвер, что на боевом пути.
+   Проверено так: `pnpm exec vitest run tests/runtimes/chat-run-inactivity-timeout.test.ts` → 32 passed.
+8. ~~`OD_CLAUDE_STRICT_MCP`~~ — ЗАКРЫТО 05.09, коммит `2ddb2bb9dc`. Флаг появляется только при
+   значении ровно `'1'`, отсутствует по умолчанию и при `'0'`/`'true'`/`'yes'`/`''`, и стоит
+   раньше `--permission-mode`.
+   Проверено так: `pnpm exec vitest run tests/runtimes/claude-strict-mcp-args.test.ts` → 4 passed.
 9. Выпадашка выбора скилла (`apps/web/src/components/NewProjectPanel.tsx`).
 
 ## C. Осталось только владельцу
