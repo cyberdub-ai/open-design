@@ -685,11 +685,24 @@ export const TOOL_DEFS = [
       type: 'object',
       properties: {
         project: PROJECT_ARG,
-        name: { type: 'string' },
-        skillId: { type: 'string' },
-        designSystemId: { type: 'string' },
-        pendingPrompt: { type: 'string' },
-        metadata: { type: 'object', additionalProperties: true },
+        name: { type: 'string', description: 'New display name for the project.' },
+        skillId: {
+          type: 'string',
+          description: 'Skill to attach to the project, by id from list_skills.',
+        },
+        designSystemId: {
+          type: 'string',
+          description: 'Design system to attach to the project, by id from od://design-systems/.',
+        },
+        pendingPrompt: {
+          type: 'string',
+          description: 'Prompt to stage on the project so the next run starts from it.',
+        },
+        metadata: {
+          type: 'object',
+          additionalProperties: true,
+          description: 'Project metadata to merge. Only the keys you pass are written.',
+        },
       },
       required: ['project'],
       additionalProperties: false,

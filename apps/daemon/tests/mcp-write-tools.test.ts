@@ -417,3 +417,31 @@ describe('formatDaemonError (shared error mapper)', () => {
     expect(text).toContain('409');
   });
 });
+
+// A tool's input schema is user-facing copy: the calling agent picks arguments
+// from these descriptions alone. A property without one is invisible to the
+// caller, and it also silently narrows the union that
+// `mcp-brief-app.test.ts` relies on to sweep MCP copy — so the gap costs both
+// discoverability and typecheck coverage. Fork-restored tools are the usual
+// source of the omission, since an upstream merge re-lands the tool body
+// without its schema prose.
+describe('MCP tool schema copy', () => {
+  it('declares a description for every tool and every input property', async () => {
+    const { localMcpToolDefinitions } = await import('../src/mcp.js');
+    const gaps: string[] = [];
+
+    for (const tool of localMcpToolDefinitions()) {
+      if (typeof tool.description !== 'string' || tool.description.trim() === '') {
+        gaps.push(`${tool.name}: tool description`);
+      }
+      for (const [property, schema] of Object.entries(tool.inputSchema.properties ?? {})) {
+        const described = (schema as { description?: unknown }).description;
+        if (typeof described !== 'string' || described.trim() === '') {
+          gaps.push(`${tool.name}.${property}`);
+        }
+      }
+    }
+
+    expect(gaps).toEqual([]);
+  });
+});
