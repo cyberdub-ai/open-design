@@ -1,24 +1,16 @@
 {
-  "id": "0.21.0",
-  "title": "Reliable, Start to Finish",
-  "body": "HTML previews stay visible as you switch projects, files, or between Code and Preview.\nAgent connections are more reliable, with improved support for current DeepSeek Harness and Kimi releases.\nRelaunching Open Design now recovers more reliably after an unexpected shutdown.",
+  "id": "0.22.1",
+  "title": "Join the OpenDesign AI Prototype Hackathon",
+  "body": "Build beyond the chatbox: Use OpenDesign to create a complete, clickable AI product experience between September 9–18.\nCreate and share: Enter solo or with a team of up to five, record a 30–90 second demo, publish it on X, and submit your project to the community.\nWin OpenDesign credits: The top three projects will receive US$1,000, US$600, and US$200. The first 50 participants with a valid submission will also receive US$5 each.",
   "imageUrl": "https://whatsnew.open-design.ai/0.18.0.webp",
-<<<<<<< HEAD
-  "linkUrl": "https://github.com/nexu-io/open-design/releases/tag/open-design-v0.21.0",
+  "linkUrl": "https://open-design.ai/opendesign-hackathon/",
+  "ctaLabel": "Join the Hackathon",
   "locales": {
     "zh-CN": {
-      "title": "从启动到预览，始终可靠",
-      "body": "切换项目、文件，或在「代码」与「预览」之间切换时，HTML 预览保持正常显示。\n提升 Agent 连接稳定性，并完善对新版 DeepSeek Harness 与 Kimi 的兼容。\n意外退出后重新启动时，Open Design 能够更可靠地恢复运行。"
-=======
-  "linkUrl": "https://open-design.ai/llm-arena-for-design/",
-  "ctaLabel": "View Arena",
-  "locales": {
-    "zh-CN": {
-      "title": "OpenDesign Arena 正式上线",
-      "body": "十多款模型实测：使用 OpenDesign Harness，对比模型的设计表现与成本。\nDeepSeek V4.1 Flash 评分领先：DeepSeek V4.1 Flash 的均分达到榜首 GPT-6 Astra 的 98%，平均成本仅为其 1%。\n找到适合你的模型：前往 Arena，根据创作需求与预算选择模型。",
-      "linkUrl": "https://open-design.ai/zh/llm-arena-for-design/",
-      "ctaLabel": "查看评测站"
->>>>>>> 21bba485b (fix(whats-new): support localized Arena CTA labels (#7943))
+      "title": "参加 OpenDesign AI 原型黑客松",
+      "body": "突破聊天框：9 月 9 日—18 日，使用 OpenDesign 打造一款完整、可点击的 AI 产品原型。\n创作并分享：单人或组队均可！录制一段 30—90 秒的 Demo，发布到 X，并在discord或飞书提交作品。\n赢取 OpenDesign Credit：前三名将分别获得 US$1,000、US$600 和 US$200。前 50 位完成有效投稿的参赛者，每人还可获得 US$5。",
+      "linkUrl": "https://open-design.ai/opendesign-hackathon/",
+      "ctaLabel": "参加黑客松"
     }
   }
 }
