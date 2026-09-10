@@ -1,16 +1,15 @@
 {
-  "id": "0.22.1",
-  "title": "Join the OpenDesign AI Prototype Hackathon",
-  "body": "Build beyond the chatbox: Use OpenDesign to create a complete, clickable AI product experience between September 9–18.\nCreate and share: Enter solo or with a team of up to five, record a 30–90 second demo, publish it on X, and submit your project to the community.\nWin OpenDesign credits: The top three projects will receive US$1,000, US$600, and US$200. The first 50 participants with a valid submission will also receive US$5 each.",
-  "imageUrl": "https://whatsnew.open-design.ai/0.18.0.webp",
-  "linkUrl": "https://open-design.ai/opendesign-hackathon/",
-  "ctaLabel": "Join the Hackathon",
+  "id": "0.22.2",
+  "title": "More reliable update restarts",
+  "body": "Open Design 0.22.2 improves update restarts on macOS and Windows. The app waits for the previous instance to close and keeps the waiting message visible while background work finishes. See the release notes for what to expect when upgrading from an older version.",
+  "linkUrl": "https://github.com/nexu-io/open-design/releases/tag/open-design-v0.22.2",
+  "ctaLabel": "View release notes",
   "locales": {
     "zh-CN": {
-      "title": "参加 OpenDesign AI 原型黑客松",
-      "body": "突破聊天框：9 月 9 日—18 日，使用 OpenDesign 打造一款完整、可点击的 AI 产品原型。\n创作并分享：单人或组队均可！录制一段 30—90 秒的 Demo，发布到 X，并在discord或飞书提交作品。\n赢取 OpenDesign Credit：前三名将分别获得 US$1,000、US$600 和 US$200。前 50 位完成有效投稿的参赛者，每人还可获得 US$5。",
-      "linkUrl": "https://open-design.ai/opendesign-hackathon/",
-      "ctaLabel": "参加黑客松"
+      "title": "更可靠的更新重启",
+      "body": "Open Design 0.22.2 改善了 macOS 和 Windows 的更新重启。应用会等待旧实例退出，并在后台任务清理期间保持等待提示。从旧版本升级时的注意事项，请查看更新说明。",
+      "linkUrl": "https://github.com/nexu-io/open-design/releases/tag/open-design-v0.22.2",
+      "ctaLabel": "查看更新说明"
     }
   }
 }
