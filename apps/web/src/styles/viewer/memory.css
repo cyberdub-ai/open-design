@@ -645,6 +645,15 @@
   min-height: 0;
   background: var(--bg);
 }
+/* Manual editing is an active workspace interaction, so its controls must
+   remain clickable above body-portaled non-modal prompts such as
+   ExperienceSurvey (z-index 1400). Raise the shell that is the prompt's
+   direct stacking sibling; nested workspace layers cannot reliably escape
+   the shell's grid painting order. */
+.workspace-shell:has(.manual-edit-workspace) {
+  position: relative;
+  z-index: 1500;
+}
 .manual-edit-workspace > .manual-edit-right {
   position: absolute;
   top: 8px;
@@ -1329,7 +1338,8 @@
 .manual-edit-footer-right {
   flex: 0 0 auto;
 }
-.manual-edit-delete-btn {
+.manual-edit-delete-btn,
+.manual-edit-history-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1346,17 +1356,24 @@
     color var(--duration-ultra-fast, 50ms) var(--curve-easy-ease, ease),
     transform var(--duration-faster, 100ms) var(--curve-easy-ease, ease);
 }
+.manual-edit-history-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-muted);
+  color: var(--text-strong);
+}
 .manual-edit-delete-btn:hover:not(:disabled) {
   background: var(--red-bg);
   color: var(--red);
 }
-.manual-edit-delete-btn:active:not(:disabled) {
+.manual-edit-delete-btn:active:not(:disabled),
+.manual-edit-history-btn:active:not(:disabled) {
   transform: translateY(1px);
 }
 .manual-edit-delete-confirm-action {
   color: var(--red);
 }
 .manual-edit-delete-btn:disabled,
+.manual-edit-history-btn:disabled,
 .manual-edit-footer-btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;

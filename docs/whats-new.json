@@ -1,0 +1,16 @@
+{
+  "id": "0.22.1",
+  "title": "Join the OpenDesign AI Prototype Hackathon",
+  "body": "Build beyond the chatbox: Use OpenDesign to create a complete, clickable AI product experience between September 9–18.\nCreate and share: Enter solo or with a team of up to five, record a 30–90 second demo, publish it on X, and submit your project to the community.\nWin OpenDesign credits: The top three projects will receive US$1,000, US$600, and US$200. The first 50 participants with a valid submission will also receive US$5 each.",
+  "imageUrl": "https://whatsnew.open-design.ai/0.18.0.webp",
+  "linkUrl": "https://open-design.ai/opendesign-hackathon/",
+  "ctaLabel": "Join the Hackathon",
+  "locales": {
+    "zh-CN": {
+      "title": "参加 OpenDesign AI 原型黑客松",
+      "body": "突破聊天框：9 月 9 日—18 日，使用 OpenDesign 打造一款完整、可点击的 AI 产品原型。\n创作并分享：单人或组队均可！录制一段 30—90 秒的 Demo，发布到 X，并在discord或飞书提交作品。\n赢取 OpenDesign Credit：前三名将分别获得 US$1,000、US$600 和 US$200。前 50 位完成有效投稿的参赛者，每人还可获得 US$5。",
+      "linkUrl": "https://open-design.ai/opendesign-hackathon/",
+      "ctaLabel": "参加黑客松"
+    }
+  }
+}

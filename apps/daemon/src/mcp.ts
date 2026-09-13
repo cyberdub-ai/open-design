@@ -65,7 +65,8 @@ import {
 
 const SERVER_NAME = 'open-design';
 const SERVER_VERSION = '0.2.0';
-const MCP_STDIO_IDLE_EXIT_MS = 30 * 60 * 1000;
+const DEFAULT_MCP_STDIO_IDLE_EXIT_MS = 30 * 60 * 1000;
+const MAX_MCP_STDIO_IDLE_EXIT_MS = 24 * 60 * 60 * 1000;
 export const OPEN_DESIGN_BRIEF_APP_RESOURCE =
   'ui://open-design/artifact-card-v8.html';
 
@@ -210,6 +211,17 @@ interface McpIdleExitControllerOptions {
   onIdle: () => void;
 }
 
+export function _resolveMcpStdioIdleExitMs(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw = env.OD_MCP_STDIO_IDLE_EXIT_MS?.trim();
+  const parsed = Number(raw);
+  if (!raw || !Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_MCP_STDIO_IDLE_EXIT_MS;
+  }
+  return Math.min(MAX_MCP_STDIO_IDLE_EXIT_MS, Math.floor(parsed));
+}
+
 export function _createMcpIdleExitController({
   idleMs,
   onIdle,
@@ -226,7 +238,7 @@ export function _createMcpIdleExitController({
   };
 
   const schedule = () => {
-    if (disposed) return;
+    if (disposed || idleMs <= 0) return;
     clear();
     timer = setTimeout(() => {
       timer = null;
@@ -419,6 +431,7 @@ export const TOOL_DEFS = [
           description:
             'BCP-47 Host locale used only when collect_brief had no request or tool-call locale.',
         },
+        pluginWorkflowId: PLUGIN_WORKFLOW_ID_ARG,
       },
       required: ['briefDraftId', 'nonce', 'answers'],
       additionalProperties: false,
@@ -1298,6 +1311,15 @@ export class McpObservabilitySession {
     if (name === 'confirm_brief') {
       const inherited = briefStore.attributionForDraft(args.briefDraftId);
       if (inherited) {
+        if (
+          args.pluginWorkflowId !== undefined
+          && validatePluginWorkflowId(args.pluginWorkflowId)
+            !== inherited.pluginWorkflowId
+        ) {
+          throw pluginContractError(
+            'pluginWorkflowId does not match the brief draft',
+          );
+        }
         this.workflows.set(
           inherited.pluginWorkflowId,
           inherited.externalPluginContext,
@@ -1306,6 +1328,12 @@ export class McpObservabilitySession {
           context: inherited.externalPluginContext,
           pluginWorkflowId: inherited.pluginWorkflowId,
         };
+      }
+      if (args.pluginWorkflowId !== undefined) {
+        validatePluginWorkflowId(args.pluginWorkflowId);
+        throw pluginContractError(
+          'pluginWorkflowId requires an attributed brief draft',
+        );
       }
     }
 
@@ -1841,7 +1869,7 @@ export async function runMcpStdio(options: RunMcpOptions): Promise<void> {
   let observabilityPromise: Promise<McpObservabilitySession> | null = null;
   let closeTransportForIdle: (() => void) | null = null;
   const idleExit = _createMcpIdleExitController({
-    idleMs: MCP_STDIO_IDLE_EXIT_MS,
+    idleMs: _resolveMcpStdioIdleExitMs(),
     onIdle: () => closeTransportForIdle?.(),
   });
   const withMcpActivity =
@@ -2099,6 +2127,7 @@ const PROJECT_OR_RUN_TOOLS = new Set([
   'delete_file',
   'delete_project',
   'create_project',
+  'update_project',
   'create_artifact',
   'start_run',
   'get_run',

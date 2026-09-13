@@ -12,9 +12,10 @@ import type {
 } from '../public-params.js';
 import type { ReleaseChannel } from '@open-design/release';
 import type { ArtifactOriginEntrySurface, ArtifactOriginStatus } from '../../api/files.js';
+import type { AgentDiagnosticReason, AgentDiagnosticSeverity } from '../../api/registry.js';
 import type { TrackingDesignSystemEditSurface, TrackingDesignSystemKind, TrackingDesignSystemLengthBucket, TrackingDesignSystemOrigin, TrackingDesignSystemRunEntryFrom } from './design-systems.js';
 import type { TrackingSettingsPage } from './event-names.js';
-import type { TrackingAmrOpenCodeErrorPhase, TrackingAmrOpenCodeLastEventType, TrackingAmrOpenCodeLastToolKind, TrackingAmrOpenCodeLastToolStatus, TrackingArtifactKind, TrackingArtifactWriteSource, TrackingArtifactWriteStatus, TrackingByokPreflightBlockReason, TrackingByokProviderId, TrackingCliProviderId, TrackingDesignSystemSource, TrackingExecutionMode, TrackingExportFormat, TrackingExportResult, TrackingFeedbackAction, TrackingFeedbackProviderId, TrackingFeedbackRating, TrackingFeedbackRatingWithNone, TrackingFeedbackReasonCode, TrackingFidelity, TrackingFileSizeBucket, TrackingFileType, TrackingFirstModelEventType, TrackingLangfuseDeliveryStatus, TrackingLangfuseDropReason, TrackingLangfuseReportResult, TrackingLangfuseReportSkipReason, TrackingProjectKind, TrackingProjectSource, TrackingPublishErrorCode, TrackingResult, TrackingRunCancelOrigin, TrackingRunCloseReason, TrackingRunDiagnosticSource, TrackingRunFailureCategory, TrackingRunFailureDetail, TrackingRunFailureStage, TrackingRunFailureUserAction, TrackingRunLifecyclePhase, TrackingRunPhaseTimingStatus, TrackingRunResult, TrackingRunRetryFinalResult, TrackingRunRetryStrategy, TrackingRunRetrySuppressedReason, TrackingRunTerminalTrigger, TrackingStderrLineCountBucket, TrackingTestResult, TrackingTokenCountSource } from './shared-enums.js';
+import type { TrackingAmrOpenCodeErrorPhase, TrackingAmrOpenCodeLastEventType, TrackingAmrOpenCodeLastToolKind, TrackingAmrOpenCodeLastToolStatus, TrackingArtifactKind, TrackingArtifactWriteSource, TrackingArtifactWriteStatus, TrackingByokPreflightBlockReason, TrackingByokProviderId, TrackingCliProviderId, TrackingDesignSystemSource, TrackingExecutionMode, TrackingExportFormat, TrackingExportResult, TrackingFeedbackAction, TrackingFeedbackProviderId, TrackingFeedbackRating, TrackingFeedbackRatingWithNone, TrackingFeedbackReasonCode, TrackingFidelity, TrackingFileSizeBucket, TrackingFileType, TrackingFirstModelEventType, TrackingHarness, TrackingLabsItemId, TrackingLabsOptOutReason, TrackingLabsSystemReason, TrackingLabsToggleSource, TrackingLangfuseDeliveryStatus, TrackingLangfuseDropReason, TrackingLangfuseReportResult, TrackingLangfuseReportSkipReason, TrackingProjectKind, TrackingProjectSource, TrackingPublishErrorCode, TrackingResult, TrackingRunAdmissionPhase, TrackingRunPolicyReason, TrackingRunAdmissionStatus, TrackingRunCancelOrigin, TrackingRunCloseReason, TrackingRunDiagnosticSource, TrackingRunEvidenceLevel, TrackingRunFailureCategory, TrackingRunFailureDetail, TrackingRunFailureDomain, TrackingRunFailureMechanism, TrackingRunFailureStage, TrackingRunFailureUserAction, TrackingRunLifecyclePhase, TrackingRunMatureUnfinishedState, TrackingRunPhaseTimingStatus, TrackingRunPosthogAcknowledgement, TrackingRunPosthogDeliveryStatus, TrackingRunPosthogErrorType, TrackingRunReconciliationIntegrity, TrackingRunRepairOwner, TrackingRunResult, TrackingRunRetryFinalResult, TrackingRunRetryStrategy, TrackingRunRetrySuppressedReason, TrackingRunTerminalIntegrity, TrackingRunTerminalPersistenceErrorType, TrackingRunTerminalPersistenceStatus, TrackingRunTerminalTrigger, TrackingRunTerminationOrigin, TrackingStderrLineCountBucket, TrackingTestResult, TrackingTokenCountSource } from './shared-enums.js';
 import type { ConversationForkAnalyticsContext, TrackingFileVersionSource, TrackingPluginImportSource, TrackingSessionMode, TrackingSettingsArea } from './ui-click.js';
 // ---- Result events -------------------------------------------------------
 
@@ -40,6 +41,37 @@ export interface MediaGenerationResultProps {
   retry_final_result: 'not_attempted' | 'success' | 'failed' | 'skipped_retry_after_budget';
   duration_ms: number;
   used_stub_fallback: boolean;
+}
+
+/**
+ * One chat turn's artifact-snapshot outcome, emitted at the run's terminal
+ * chokepoint — the moment the daemon decides what evidence this message will
+ * carry forever.
+ *
+ * `source_changed_count` is broken out of `failed_count` on purpose. Every
+ * other failure means "we could not keep a copy"; this one means the file on
+ * disk stopped being the file this turn produced BEFORE the copy was taken, so
+ * the capture window itself is wrong. It is the only counter here that
+ * indicates a correctness failure rather than a capacity or availability one,
+ * and it should alarm on its own rather than be averaged into a failure rate.
+ *
+ * Nothing here identifies content: no paths, no labels, no digests, no bytes.
+ */
+export interface ChatArtifactCaptureResultProps {
+  page_name: 'studio';
+  area: 'chat_artifact_capture';
+  project_id: string;
+  run_id: string;
+  /** Cards this turn will show. */
+  ref_count: number;
+  /** Snapshots this pass wrote. */
+  captured_count: number;
+  /** Snapshots the media path had already frozen for this run. */
+  reused_count: number;
+  failed_count: number;
+  /** Subset of `failed_count`. Alarms on its own; see above. */
+  source_changed_count: number;
+  result: 'success' | 'degraded';
 }
 
 export interface ProjectCreateResultProps {
@@ -89,10 +121,49 @@ export interface SpeakerNotesSaveResultProps {
   edit_surface: 'preview' | 'presenter';
   artifact_id: string;
   artifact_kind: TrackingArtifactKind;
+  project_id: string;
+  project_kind: TrackingProjectKind;
   slide_count?: number;
   has_content?: boolean;
   result: TrackingResult;
   error_code?: string;
+}
+
+export type TrackingArtifactEditAction = 'apply' | 'undo' | 'redo';
+
+export type TrackingArtifactEditKind =
+  | 'text'
+  | 'link'
+  | 'image'
+  | 'element_remove'
+  | 'token'
+  | 'style'
+  | 'attributes'
+  | 'html'
+  | 'source';
+
+// Terminal result for a direct Manual Edit mutation. The toolbar `edit` click
+// measures entry; this event measures whether a concrete file mutation was
+// actually persisted, including undo/redo. Content, selectors and filenames
+// are intentionally excluded.
+export interface ArtifactEditResultProps {
+  page_name: 'artifact';
+  area: 'manual_edit';
+  action: TrackingArtifactEditAction;
+  edit_kind: TrackingArtifactEditKind;
+  artifact_id: string;
+  artifact_kind: TrackingArtifactKind;
+  project_id: string;
+  project_kind: TrackingProjectKind;
+  result: TrackingResult;
+  error_code?:
+    | 'edit_busy'
+    | 'source_unavailable'
+    | 'patch_invalid'
+    | 'source_conflict'
+    | 'save_failed'
+    | 'unknown';
+  duration_ms: number;
 }
 
 // Outcome of an actual import attempt from the plugin import modal. Fires
@@ -406,6 +477,25 @@ export interface RunCreatedProps extends RunTaskLineageProps {
   attempt_count?: number;
   generation_slo_window_ms?: number;
   recharge_wait_duration_ms?: number;
+  /**
+   * Which harness actually produced this run.
+   *
+   * The whole point of the Labs switch is a before/after comparison, and that
+   * comparison is only possible if every run says which side it is on. Read
+   * from the run's own rollout decision rather than the live setting, because
+   * the setting can change while the run is in flight.
+   */
+  harness?: TrackingHarness;
+  /**
+   * Why a run took the ordinary route while the user had the switch on.
+   *
+   * Answers the question a support thread cannot: "I enabled it and nothing
+   * changed." The switch can be on and still not apply — the project's task
+   * type, the selected agent, an explicitly chosen plugin, or an unverified
+   * runtime capability each route back. Omitted when `harness` is `od_next`,
+   * and when the user never opted in (there is nothing to explain).
+   */
+  harness_fallback_reason?: string;
 }
 
 export interface RunFinishedProps extends Omit<RunCreatedProps, 'area'> {
@@ -421,6 +511,34 @@ export interface RunFinishedProps extends Omit<RunCreatedProps, 'area'> {
   /** v4 name; failure_detail remains during the compatibility window. */
   failure_reason?: TrackingRunFailureDetail;
   failure_stage?: TrackingRunFailureStage;
+  /** Versioned causal classification added alongside the legacy category/detail. */
+  failure_mechanism?: TrackingRunFailureMechanism;
+  failure_domain?: TrackingRunFailureDomain;
+  evidence_level?: TrackingRunEvidenceLevel;
+  repair_owner?: TrackingRunRepairOwner;
+  admission_status?: TrackingRunAdmissionStatus;
+  /** Independent of policy reason; never inferred from missing tokens. */
+  admission_phase?: TrackingRunAdmissionPhase;
+  policy_reason?: TrackingRunPolicyReason;
+  terminal_integrity?: TrackingRunTerminalIntegrity;
+  /** Current physical attempt within this Open Design Run. */
+  run_attempt?: number;
+  /** Vela-owned runtime generation UUID when explicitly reported back. */
+  runtime_generation_id?: string;
+  termination_origin?: TrackingRunTerminationOrigin;
+  terminal_persistence_status?: TrackingRunTerminalPersistenceStatus;
+  terminal_persistence_error_type?: TrackingRunTerminalPersistenceErrorType | null;
+  /** Local PostHog queue state; `queued` is not a remote ingestion ACK. */
+  posthog_delivery_status?: TrackingRunPosthogDeliveryStatus;
+  posthog_acknowledgement?: TrackingRunPosthogAcknowledgement;
+  posthog_delivery_attempt_count?: number;
+  posthog_error_type?: TrackingRunPosthogErrorType | null;
+  mature_unfinished_state?: TrackingRunMatureUnfinishedState;
+  reconciliation_generation?: string;
+  reconciliation_integrity?: TrackingRunReconciliationIntegrity;
+  duplicate_terminal_count?: number;
+  late_terminal_count?: number;
+  classifier_version?: 'run-failure-v2' | 'run-failure-v3';
   retryable?: boolean;
   /** v4 name; retryable remains during the compatibility window. */
   is_automatic_retry_eligible?: boolean;
@@ -444,6 +562,17 @@ export interface RunFinishedProps extends Omit<RunCreatedProps, 'area'> {
   tool_call_seen?: boolean;
   artifact_write_seen?: boolean;
   live_artifact_seen?: boolean;
+  /** Bounded summary of Vela/OpenCode v1 tool-execution lifecycle diagnostics. */
+  tool_execution_lifecycle_seen?: boolean;
+  tool_execution_lifecycle_count_bucket?: '1' | '2_5' | '6_20' | 'gt_20';
+  tool_execution_trigger?: 'exit' | 'abort' | 'deadline' | 'mixed' | 'unknown';
+  tool_execution_terminal?: 'running' | 'returned' | 'failed' | 'interrupted' | 'mixed' | 'unknown';
+  tool_terminal_source?: 'tool_result' | 'tool_error' | 'processor_cleanup' | 'mixed' | 'unknown';
+  tool_kill_outcome?: 'none' | 'requested' | 'sent' | 'failed';
+  tool_child_close_seen?: boolean;
+  tool_stdout_close_seen?: boolean;
+  tool_stderr_close_seen?: boolean;
+  tool_execution_evidence_incomplete?: boolean;
   deliverable_valid?: boolean;
   deliverable_validation?: 'valid' | 'invalid';
   artifact_origin_status?: ArtifactOriginStatus;
@@ -478,6 +607,44 @@ export interface RunFinishedProps extends Omit<RunCreatedProps, 'area'> {
   asked_user_question: boolean;
   /** v4 name; asked_user_question remains during the compatibility window. */
   clarification_requested: boolean;
+  // Artifact-focus declaration, the mechanism that decides which files get a
+  // result card. Build all four with `buildArtifactFocusTelemetry`
+  // (`analytics/artifact-focus.ts`) rather than by hand — `declared_*` counts
+  // paths the host could actually ACT on, which is not the same as paths the
+  // model wrote, and `fallback_picked_count` has to agree with the panel's own
+  // `pickPrimaryArtifacts` or the two columns cannot be compared.
+  //
+  // Optional because they are only knowable where the turn's marker events and
+  // its written-file list are both in hand; emit sites without that evidence
+  // omit them rather than reporting a confident `false`.
+  /**
+   * The turn emitted a `<od-focus show="…">` the host could act on.
+   *
+   * The one number that says whether the instruction works. Its only prior
+   * measurement came from a diagnostics zip that happened to be attached to a
+   * bug report: 100% on turns that created a file, 22–25% on turns that only
+   * edited one.
+   */
+  declared_artifact_focus?: boolean;
+  /** Usable paths in that declaration. `0` when the turn declared nothing. */
+  declared_count?: number;
+  /**
+   * Main artifacts the host picked for an UNDECLARED turn; `0` when the turn
+   * declared (the fallback did not run). A `0` on a turn that wrote files is a
+   * turn with no result cards at all — the OPEND-2550 symptom.
+   */
+  fallback_picked_count?: number;
+  /**
+   * Every file this turn wrote was a dependency (`.js` / `.css` / `.svg` /
+   * `.json` and family), so the fallback had no deliverable to show.
+   *
+   * This is the frequency of the ONE case that would justify letting a card
+   * point at a file the turn did not write ("changed `app.js`, show the
+   * `index.html` that includes it"). That exception is deliberately NOT built:
+   * it breaks the marker contract's own rule that a card never points outside
+   * the turn's output. If this stays near zero it never needs building.
+   */
+  wrote_only_dependencies?: boolean;
   /** Main user-visible artifact outcome; omitted for Ask, clarification and DS Runs. */
   primary_artifact_change?: 'none' | 'created' | 'modified';
   input_tokens?: number;
@@ -621,6 +788,18 @@ export interface RunFinishedProps extends Omit<RunCreatedProps, 'area'> {
   retry_original_failure_category?: TrackingRunFailureCategory;
   retry_original_failure_detail?: TrackingRunFailureDetail;
   retry_original_failure_stage?: TrackingRunFailureStage;
+  /** Exact, content-free ACP prompt frame measurement captured at the writer boundary. */
+  prompt_budget_version?: 'prompt_budget_v1';
+  prompt_frame_bytes?: number;
+  prompt_bytes?: number;
+  prompt_token_estimate?: number;
+  prompt_token_estimate_method?: 'utf8_bytes_div_3_ceil_v1';
+  prompt_session_mode?: 'new' | 'resume';
+  prompt_model_id?: string;
+  prompt_context_window_source?: 'model_metadata' | 'unknown';
+  prompt_context_window_tokens?: number;
+  prompt_prior_session_usage_source?: 'agent_session' | 'unknown';
+  prompt_prior_session_input_tokens?: number;
 }
 
 export interface LangfuseReportResultProps {
@@ -798,6 +977,7 @@ export interface SketchSaveResultProps {
   result: TrackingExportResult;
   error_code?: string;
   project_id: string;
+  project_kind: TrackingProjectKind;
 }
 
 // Fired when the user exports a sketch to a PNG from the sketch editor, which
@@ -811,6 +991,7 @@ export interface SketchExportResultProps {
   result: TrackingExportResult;
   error_code?: string;
   project_id: string;
+  project_kind: TrackingProjectKind;
 }
 
 export type TrackingDeployProvider = 'vercel' | 'cloudflare_pages';
@@ -995,10 +1176,61 @@ export interface AssistantFeedbackReasonSubmitProps
   action: 'submit_feedback_reason';
 }
 
+/**
+ * One Labs experiment switch moved.
+ *
+ * Generic on purpose: the experiment is a property (`item_id`), not part of the
+ * event name, so a second experiment reuses this event and every existing
+ * PostHog query keeps working.
+ *
+ * Direction and reason ride on the same event because the dashboard reads them
+ * together — opt-out rate is `to: 'off'` split by `reason`. The reason panel
+ * appears *after* the switch moves, so an opt-out emits twice: once
+ * immediately without a reason, once more if the user gives one. Count
+ * opt-outs from the first, read reasons from the second.
+ */
+export interface LabsItemToggledProps {
+  item_id: TrackingLabsItemId;
+  to: 'on' | 'off';
+  source: TrackingLabsToggleSource;
+  /** Only when `source` is `system`. */
+  system_reason?: TrackingLabsSystemReason;
+  /** Only on the follow-up emit after an opt-out, once the user answers. */
+  reason?: TrackingLabsOptOutReason[];
+  has_custom_reason?: boolean;
+  /** Raw free text from the "other" field. Empty when unused. */
+  custom_reason?: string;
+}
+
 // SETTINGS view + result events (page=settings)
 export interface SettingsViewProps {
   page_name: TrackingSettingsPage;
   area: TrackingSettingsArea;
+}
+
+/**
+ * One diagnostic detection produced for one agent CLI. Answers, fleet-wide, the
+ * question a single bug report can only answer for one machine: how many
+ * installs of an agent someone installed cannot actually be used, and why.
+ *
+ * Carries no `page_name` on purpose. Detection is a daemon fact reported to
+ * whichever surface asked for the agent list; the surface is incidental to the
+ * failure and splitting by it would fragment the only number that matters.
+ *
+ * Carries no resolved path on purpose either — an agent binary path contains
+ * the OS username.
+ */
+export interface AgentDetectDiagnosticProps {
+  area: 'runtime_detection';
+  cli_provider_id: TrackingCliProviderId;
+  reason: AgentDiagnosticReason;
+  severity: AgentDiagnosticSeverity;
+  /** Warnings are not blocking, so availability is what separates them. */
+  agent_available: boolean;
+  /** The version detection read, when it read one. */
+  agent_version?: string;
+  /** A row with no path is hidden entirely — the user sees nothing to fix. */
+  has_path: boolean;
 }
 
 export interface SettingsCliTestResultProps {
@@ -1100,6 +1332,16 @@ export interface PackagedRuntimeFailedProps {
   // though the reason was sitting in a log we had already read. Scrubbed and
   // truncated like the other free-form fields.
   daemon_error?: string | null;
+  // The scrubbed, bounded tail of that same log, sent ONLY when the parse above
+  // produced nothing (no error_code, no missing_module, no daemon_error). That
+  // all-null combination is the largest startup-failure bucket in production
+  // (macOS daemon-start, 968 events / 293 people over the 14 days to
+  // 2026-08-22) and was previously undiagnosable: the reason was printed in a
+  // log we had already read and discarded because it matched no known pattern.
+  // Narrow by design — when the cause is already named, the raw tail is bytes
+  // and privacy surface for nothing, so a present value also *means* "this log
+  // defeated the parser".
+  daemon_log_tail?: string | null;
   // Node's system-error triplet read off the THROWN error object, as opposed to
   // `error_code`, which is parsed out of the sidecar log. A failed spawn or
   // socket op carries its real cause here (`UNKNOWN`/-4094/`spawn`,

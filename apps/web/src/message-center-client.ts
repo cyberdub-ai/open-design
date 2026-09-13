@@ -2,6 +2,9 @@ export type MessageCenterFilter = 'all' | 'unread' | 'read';
 
 export interface MessageCenterMessage {
   id: string;
+  /** Optional stable selector for client-owned special behavior. Ordinary
+   *  messages do not need one and continue through the inbox unchanged. */
+  messageKey?: string | null;
   audienceType: 'global' | 'targeted';
   typeName: string;
   title: string;
@@ -10,6 +13,20 @@ export interface MessageCenterMessage {
   ctaUrl: string | null;
   publishedAt: string;
   readAt: string | null;
+}
+
+/** One-off, client-owned announcement selector. The message center remains a
+ * generic inbox: only slugs with this prefix opt into the preset strong dialog. */
+export const GO_PLAN_SUNSET_MESSAGE_KEY_PREFIX = 'go-plan-sunset-2026-08';
+
+export function findGoPlanSunsetMessage(
+  messages: readonly MessageCenterMessage[],
+): MessageCenterMessage | null {
+  return messages.find((message) => (
+    message.audienceType === 'targeted'
+    && message.readAt == null
+    && message.messageKey?.startsWith(GO_PLAN_SUNSET_MESSAGE_KEY_PREFIX)
+  )) ?? null;
 }
 
 interface MessageCenterPage {
@@ -48,6 +65,30 @@ export function clearAnonymousState(storage: Storage): void {
   storage.removeItem(LEGACY_WINDOW_KEY);
 }
 
+/**
+ * Whether an AMR account is signed in, from the Message Center's point of view.
+ *
+ * This deliberately does NOT join the shared AMR-status read that App and
+ * ChatPane sit on (`readVelaLoginStatus`), even though it is the same URL and
+ * the requests overlap on a cold open. `MessageCenter` calls this from two
+ * places, and one of them is `resolveLoggedInForWrite` — the check it makes
+ * immediately before POSTing a read-receipt. That is an AUTHORITY question
+ * ("am I signed in right now?"), not a display read, and joining an ambient
+ * request issued moments earlier answers it with the state from before the
+ * user signed in: the receipt then takes the anonymous path and is written to
+ * localStorage instead of the account. `tests/components/MessageCenter.test.tsx`
+ * ("re-checks auth on write after an anonymous mount") pins exactly that.
+ *
+ * Splitting the Message Center's display read from its write-authority read is
+ * the way to reclaim the mount duplicates, but it belongs in `MessageCenter.tsx`
+ * — this module cannot tell the two callers apart.
+ *
+ * The failure mapping is its own too: `fetchVelaLoginStatus` collapses every
+ * failure into `null`, while `sync()` needs the throw to show its retry state
+ * instead of silently rendering the anonymous inbox to a signed-in user. A 503
+ * naming `amr-runtime-unavailable` is the one non-ok answer that IS
+ * authoritative: there is no runtime, so there is no account.
+ */
 export async function isAmrLoggedIn(): Promise<boolean> {
   const response = await fetch('/api/integrations/vela/status', { cache: 'no-store' });
   if (response.status === 503) {

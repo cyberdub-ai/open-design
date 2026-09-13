@@ -69,6 +69,39 @@ describe('public MCP update_project', () => {
     expect(JSON.parse(String(patchInit?.body))).toEqual({ skillId: 'deck' });
   });
 
+  it('передаёт контекст workspace при обновлении проекта', async () => {
+    const base = nextBaseUrl();
+    const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url.endsWith('/api/workspace/directory')) {
+        return Response.json({
+          items: [{
+            workspaceId: 'ws-personal', workspaceName: 'Personal',
+            workspaceType: 'personal', workspaceMemberId: 'mem-1',
+            role: 'owner', memberStatus: 'active', lifecycleState: 'active',
+          }],
+          activeWorkspaceId: 'ws-personal',
+        });
+      }
+      if (url.endsWith('/projects')) {
+        return Response.json({ projects: [{ id: 'project-1', name: 'Demo' }] });
+      }
+      return Response.json({ id: 'project-1', name: 'Renamed' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleMcpToolCall(base, 'update_project', {
+      project: 'Demo', name: 'Renamed',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(patch?.[0]).toBe(`${base}/api/projects/project-1`);
+    expect(patch?.[1]?.headers).toMatchObject({
+      'x-od-workspace-id': 'ws-personal',
+      'x-od-workspace-member-id': 'mem-1',
+    });
+  });
+
   it('refuses an empty patch without calling the daemon', async () => {
     const base = nextBaseUrl();
     const fetchMock = vi.fn(async (url: string, _init?: RequestInit) => {

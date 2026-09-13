@@ -85,19 +85,35 @@ afterEach(() => {
 });
 
 describe('HomeView media composer options', () => {
-  it('shows the Home composer mode picker and still defaults to Design mode', async () => {
+  it('keeps the type tabs interactive while switching to Image', async () => {
+    const mediaApplyResponse = new Promise<Response>(() => undefined);
+    stubFetch({ mediaApplyResponse });
+    renderHome();
+
+    const imageTab = await screen.findByTestId('home-hero-type-pill-image');
+    const prototypeTab = await screen.findByTestId('home-hero-type-pill-prototype');
+    await waitFor(() => expect((imageTab as HTMLButtonElement).disabled).toBe(false));
+
+    fireEvent.click(imageTab);
+
+    await waitFor(() => expect(imageTab.getAttribute('aria-selected')).toBe('true'));
+    expect((imageTab as HTMLButtonElement).disabled).toBe(false);
+    expect((prototypeTab as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('defaults to Design mode with no mode picker in the composer', async () => {
     stubFetch();
     const onSubmit = vi.fn();
     renderHome({ onSubmit });
 
     await screen.findByTestId('home-hero-input');
 
-    // 设计 is the app default AND the default SELECTION: the composer opens with
-    // the Design pill showing, so the mode the request will run in is stated on
-    // screen rather than hidden behind a neutral glyph. The submitted payload
-    // carries design either way.
-    expect(screen.getByTestId('composer-mode-trigger').getAttribute('aria-label')).toBe('Mode: Design');
-    expect(screen.getByTestId('composer-mode-clear')).toBeTruthy();
+    // 设计 is the app default, and since the mode chip left the Home composer
+    // (2026-09-08, product) it is also the only mode Home submits — nothing on
+    // this surface can move it any more. Absence is pinned in full by
+    // `HomeView.mode-picker-removed.test.tsx`; this spec keeps the payload half
+    // of the pair, so a picker coming back cannot quietly change what Home runs.
+    expect(screen.queryByTestId('composer-mode-trigger')).toBeNull();
 
     await setHomePrompt('Create a clean loading animation');
     await submitHome();
@@ -563,6 +579,7 @@ describe('HomeView media composer options', () => {
       emptyWorkspaceDirectory: true,
       teamMediaPlugin: true,
     });
+    const onSubmit = vi.fn();
     workspaceContextMock.state = {
       context: null,
       resourceReadIdentity: null,
@@ -570,13 +587,12 @@ describe('HomeView media composer options', () => {
       identityChangePending: false,
       failure: undefined,
     };
-    renderHome();
+    renderHome({ onSubmit });
 
     await clickHomeRailChip('video');
-
-    await waitFor(() => {
-      expect(screen.getByTestId('home-hero-submit').getAttribute('aria-busy')).toBe('false');
-    });
+    await setHomePrompt('Create a launch teaser.');
+    await submitHome();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const apply = fetchMock.mock.calls.find(([url]) => (
       typeof url === 'string' && url.includes('/api/plugins/od-media-generation/apply')
     ));
@@ -584,11 +600,14 @@ describe('HomeView media composer options', () => {
     expect(new Headers(apply?.[1]?.headers).has('x-od-workspace-id')).toBe(false);
   });
 
-  it('preserves od-media-generation required inputs when applying media chips', async () => {
+  it('preserves od-media-generation required inputs when submitting media chips', async () => {
     const fetchMock = stubFetch();
-    renderHome();
+    const onSubmit = vi.fn();
+    renderHome({ onSubmit });
 
     await clickHomeRailChip('image');
+    await setHomePrompt('Create a campaign image.');
+    await submitHome();
 
     await waitFor(() => {
       expect(fetchMock.mock.calls.some(([url, init]) => (
@@ -605,7 +624,6 @@ describe('HomeView media composer options', () => {
       subject: 'a polished product concept',
       style: 'cinematic, high-quality, on-brand',
       aspect: '16:9',
-      ratio: '16:9',
     });
   });
 });
@@ -629,6 +647,7 @@ function stubFetch(options: {
   elevenLabsVoices?: Array<{ voiceId: string; name: string; category?: string }>;
   elevenLabsVoiceError?: string;
   emptyWorkspaceDirectory?: boolean;
+  mediaApplyResponse?: Promise<Response>;
   teamMediaPlugin?: boolean;
   workspaceDirectoryStatus?: number;
 } = {}) {
@@ -673,6 +692,7 @@ function stubFetch(options: {
         if (!inputs.subject) {
           return json({ error: 'missing_inputs', fields: ['subject'] }, 422);
         }
+        if (options.mediaApplyResponse) return options.mediaApplyResponse;
       }
       return json(applyResult(pluginId));
     }

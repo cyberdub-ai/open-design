@@ -4,6 +4,8 @@ import type {
   DesktopExportArtifactResult,
   DesktopExportPdfInput,
   DesktopExportPdfResult,
+  DesktopRenderFramesInput,
+  DesktopRenderFramesResult,
   DesktopRenderSlidesInput,
   DesktopRenderSlidesResult,
 } from '@open-design/sidecar-proto';
@@ -11,25 +13,59 @@ import express from 'express';
 import multer from 'multer';
 import JSZip from 'jszip';
 import { execFile, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
-import { executionProfileFromStreamFormat, PLUGIN_SHARE_ACTION_PLUGIN_IDS } from '@open-design/contracts';
-import { isTodoWriteToolName, stopReasonIsTruncation, todoItemsFromTodoWriteInput } from '@open-design/contracts';
+import {
+  composeOdNextStrategyBundleHeadV2,
+  composeOdNextStrategyCorePromptV2,
+  OD_NEXT_BUNDLE_ECHO_GUARD_V2,
+  odNextStrategyRecipeIdentityV2,
+  renderOdNextRuntimeFactsV2,
+  composeOdNextStrategyStableRequestContextV2,
+  executionProfileFromStreamFormat,
+  PLUGIN_SHARE_ACTION_PLUGIN_IDS,
+  renderChatTurnHostProtocolInstructions,
+  resolveOdNextDeckFrameworkMode,
+} from '@open-design/contracts';
+import {
+  advanceAuthenticatedDoneCapture,
+  isTodoWriteToolName,
+  stopReasonIsTruncation,
+  todoItemsFromTodoWriteInput,
+} from '@open-design/contracts';
+import {
+  renderUnfinishedTodoRecall,
+  recalledTodosFromTodoWriteInput,
+  type RecalledTodo,
+} from '@open-design/contracts';
 import type {
   CollabCloudMemberDirectoryEntry,
   TeamProject,
   WorkspaceCollabContext,
 } from '@open-design/contracts';
 import {
+  detectOdNextDevicePlatformFromText,
+  resolveOdNextDevicePlatform,
+  selectOdNextDeviceFrameContextV2,
+  selectOdNextLayoutPrimitivesCss,
+} from '@open-design/contracts';
+import {
+  loadOdNextTaskResourcesForSnapshot,
+  materializeOdNextDeviceFrames,
+  observeOdNextDeviceShell,
+  observeOdNextLayoutPrimitives,
+} from './strategies/od-next/device-frames.js';
+import {
   composeSystemPrompt,
   detectDeckIntentSignal,
   detectMediaIntentSignal,
   detectPlatformIntentSignal,
   extractUserAuthoredSignalText,
+  planToolNoteForRuntime,
   renderConnectedExternalMcpDirective,
   resolveExclusiveSurface,
 } from './prompts/system.js';
@@ -87,6 +123,7 @@ import {
 } from './browser/index.js';
 import {
   UPLOAD_DIR,
+  composeChatAgentTextPayload,
   composeLiveInstructionPrompt,
   formatDesignFilesWorkspaceHint,
   formatProjectAttachmentHint,
@@ -99,6 +136,8 @@ import {
   resolveResearchCommandContract,
   resolveSafeProjectAttachments,
   resolveSafePromptImagePaths,
+  resolveOdNextRequestUserPrompt,
+  excludeAcpImagePathsAlreadyDeliveredAsResources,
   selectPromptImagePaths,
 } from './runtimes/chat-prompt-inputs.js';
 import {
@@ -114,8 +153,12 @@ import {
   resolveChatRunArtifactQuietPeriodMs,
   resolveChatRunFirstOutputTimeoutMs,
   resolveChatRunInactivityTimeoutMs,
+  runtimeEmissionCountsAsAgentProgress,
   resolveChatRunShutdownGraceMs,
 } from './runtimes/chat-run-lifecycle.js';
+// Shared with `POST /api/runs/:id/steer` so the opening prompt and a B11
+// mid-turn steering frame are encoded by the same writer.
+import { assertOdNextSemanticRequestFactProducerCoverage } from './runtimes/od-next-exact-input.js';
 import {
   normalizeRunContextSelection,
   renderRunContextPrompt,
@@ -128,12 +171,14 @@ import {
   persistRunFailureClassification,
   pinAssistantMessageOnRunCreate,
 } from './runtimes/chat-run-messages.js';
+import { withFailureStderrTail } from './run-diagnostics.js';
 import {
   createRunSideEffectLedger,
   foldEventIntoRunSideEffectLedger,
   resolveRunProjectKindForAnalytics,
   retryFinalResultForRunStatus,
   runArtifactCountForRun,
+  runAdmissionEvidenceForRun,
   runDesignSystemCreatedForRun,
   runFilesWrittenForRun,
   runPreviewModuleCountForRun,
@@ -143,6 +188,7 @@ import {
   scanRunEventsForRetrySideEffects,
 } from './runtimes/run-lifecycle-analytics.js';
 export {
+  composeChatAgentTextPayload,
   composeLiveInstructionPrompt,
   formatDesignFilesWorkspaceHint,
   formatProjectAttachmentHint,
@@ -155,6 +201,7 @@ export {
   resolveResearchCommandContract,
   resolveSafeProjectAttachments,
   resolveSafePromptImagePaths,
+  excludeAcpImagePathsAlreadyDeliveredAsResources,
   selectPromptImagePaths,
 } from './runtimes/chat-prompt-inputs.js';
 export {
@@ -169,6 +216,7 @@ export {
   resolveChatRunArtifactQuietPeriodMs,
   resolveChatRunFirstOutputTimeoutMs,
   resolveChatRunInactivityTimeoutMs,
+  runtimeEmissionCountsAsAgentProgress,
 } from './runtimes/chat-run-lifecycle.js';
 export {
   renderRunContextPrompt,
@@ -207,6 +255,7 @@ import {
   spawnEnvForAgent,
 } from './agents.js';
 import {
+  findKnownModel,
   getRememberedLiveModels,
   preferFreshLiveModels,
   rememberLiveModels,
@@ -215,9 +264,12 @@ import {
   resolveModelForServiceTier,
 } from './runtimes/models.js';
 import { loadMmdRouteLaunchEnv } from './runtimes/mmd-routes.js';
+import { withAcpHandshakeFailureGuidance } from './runtimes/acp-handshake-failure.js';
+import { withAcpServiceFailureCode } from './runtimes/acp-service-failure.js';
 import { preflightCodexDefaultModel } from './runtimes/codex-model-preflight.js';
 import { preparePromptFileForAgent } from './runtimes/prompt-file.js';
 import { TerminalControlSequenceStripper } from './runtimes/terminal-control.js';
+import { stampToolTiming } from './runtimes/tool-timing.js';
 import {
   buildOpenCodeByokProviderConfig,
   BYOK_OPENCODE_PROVIDER_REQUIRED_MESSAGE,
@@ -231,6 +283,7 @@ import {
   readVelaLoginStatus,
   resolveAmrProfile,
 } from './integrations/vela.js';
+import { isAbortedOperationError } from './integrations/aborted-error.js';
 import { projectResourceIdFor } from './integrations/vela-team-projects.js';
 import {
   getTeamProjectMaterialization,
@@ -270,13 +323,18 @@ export {
   signDesktopImportToken,
   verifyDesktopImportToken,
 } from './desktop-auth.js';
-import { readCurrentAppVersionInfo } from './app-version.js';
+import {
+  normalizeTelemetryAppVersionInfo,
+  readCurrentAppVersionInfo,
+  UNKNOWN_APP_VERSION,
+} from './app-version.js';
 import {
   findSkillById,
   listSkills,
   resolveSkillId,
   splitDerivedSkillId,
 } from './skills.js';
+import { resolveSkillCatalogScope } from './skill-catalog-scope.js';
 import {
   activateWorkspaceTeamSkillIfStillShared,
   resolveAndActivateWorkspaceTeamSkill,
@@ -373,6 +431,7 @@ import {
   pluginPromptBlock,
   pruneExpiredSnapshots,
   readPluginLockfile,
+  readVerifiedProjectExampleBinding,
   registerBuiltInAtomWorkers,
   registerBundledPlugins,
   registryRootsForDataDir,
@@ -413,6 +472,12 @@ import { stageAmrImagePaths } from './media/amr-image-staging.js';
 import { ingestRoutineConnectorEvolution } from './automation-routine-evolution.js';
 import { createClaudeStreamHandler } from './runtimes/claude-stream.js';
 import { createAgentTitleMarkerStripper } from './title-marker.js';
+import {
+  createPanelGrammarStripper,
+  strippingConsumedTheWholeFrame,
+} from './panel-grammar-strip.js';
+import { createArtifactFocusMarkerStripper } from './artifact-focus-marker.js';
+import { createNextStepMarkerStripper } from './next-step-marker.js';
 import { createRoleMarkerGuard } from './role-marker-guard.js';
 import { createToolLoopGuard, resolveToolLoopMode, type ToolLoopVerdict } from './tool-loop-guard.js';
 import { diagnoseClaudeCliFailure } from './claude-diagnostics.js';
@@ -432,6 +497,27 @@ import { narrowProjectCritiqueOverride } from './critique/spawn-inputs.js';
 import { createCopilotStreamHandler } from './copilot-stream.js';
 import { createJsonEventStreamHandler } from './runtimes/json-event-stream.js';
 import {
+  CODEX_APP_SERVER_STREAM_FORMAT,
+  applyCodexTransportOverride,
+  codexResolvedSandboxMode,
+} from './runtimes/defs/codex.js';
+import { attachCodexAppServerSession } from './agent-protocol/codex-app-server/session.js';
+import {
+  ensureDetectedRuntimeVersions,
+  getDetectedRuntimeVersions,
+  ensureDetectedRuntimeCapabilities,
+} from './runtimes/detection.js';
+import { resolveBundledOdNextRuntimeCapability } from './runtimes/od-next-capability-gate.js';
+import {
+  createOdNextNativeBuildPackageBindings,
+  nativeBuildPackageBindingMap,
+} from './strategies/od-next/native-build-package.js';
+import {
+  resolveAutomaticContinuationEvidence,
+  type OdNextComplexProductionResolver,
+  type OdNextExecutionPreflightResolver,
+} from './strategies/od-next/automatic-continuation-service.js';
+import {
   antigravityAuthGuidance,
   antigravityQuotaGuidance,
   classifyAgentAuthFailure,
@@ -447,13 +533,59 @@ import { importFigmaFromBytes } from './figma/figma-import.js';
 import { renderDesignSystemPreview } from './design-systems/preview.js';
 import { renderDesignSystemShowcase } from './design-systems/showcase.js';
 import { createChatRunService } from './runtimes/runs.js';
+import {
+  createAmrTerminalReportDeliveryService,
+  createAmrTerminalReportFinalizer,
+  createAmrTerminalReportOutboxStore,
+  type AmrTerminalReportDeliveryService,
+} from './storage/amr-terminal-report-outbox.js';
+import { createInternalRunCreationService } from './services/internal-run-service.js';
+import {
+  createRunAnalyticsLifecycle,
+  inheritedRunLineageHints,
+} from './services/run-analytics-lifecycle.js';
+import {
+  createOdNextRunInputProjection,
+  OdNextTaskInputSnapshotError,
+  removeOdNextRunInputProjection,
+} from './strategies/od-next/task-input-snapshot.js';
+import {
+  createOdNextInitialPromptBundleService,
+  resolveOdNextPromptRecipeForRun,
+} from './strategies/od-next/initial-prompt-bundle-service.js';
+import { OdNextMachineProtocolStream } from './strategies/od-next/protocol.js';
+import {
+  blockAutomaticContinuation,
+  prepareAutomaticStrategyContinuation,
+  projectStrategyTask,
+  odNextTurnMayInferDirectEditCompletion,
+  odNextTurnMayInferProductionCompletion,
+} from './strategies/od-next/automatic-simple-production.js';
+import { readOdNextRolloutPolicy } from './strategies/od-next/rollout.js';
+import {
+  getStrategyTaskExecutionByRunId,
+  reconcileStrategyTaskRunTerminal,
+} from './strategies/task-store.js';
+import {
+  InvalidFrozenSkillPackageError,
+  materializeFrozenSkillPackage,
+  renderFrozenSkillRosterContext,
+} from './strategies/od-next/frozen-skill-package.js';
+import { odNextExampleReferenceFact } from './strategies/od-next/example-skill-source.js';
 import { runtimeResumesSessionById } from './runtimes/types.js';
 import {
   createRunLifecycleTracer,
   runLifecycleMarkersForStreamEvent,
+  type RunLifecycleStreamEventMarkers,
 } from './run-lifecycle-tracer.js';
 import { deriveRunErrorCode, runResultFromStatus } from './run-result.js';
+import { promptBudgetAnalyticsFromDiagnostic } from './run-diagnostics.js';
 import { classifyRunFailure, isResumableFailure } from './run-failure-classification.js';
+import {
+  deliverableSyntaxFinalizerEnabled,
+  finalizeSuccessfulRunDeliverable,
+} from './artifacts/successful-run-deliverable-finalization.js';
+import { recordDeliverableSyntaxDelivery } from './artifacts/deliverable-syntax-metrics.js';
 import {
   POST_TOOL_RESUME_CONTINUATION_PROMPT,
   decidePostToolResumeRecovery,
@@ -475,9 +607,24 @@ import {
   snapshotAiHtmlVersionsForRun,
 } from './run-html-version-snapshots.js';
 import { reportRunCompletedFromDaemon } from './langfuse-bridge.js';
+import {
+  describeRunTelemetrySink,
+  readRunTelemetrySinkConfig,
+} from './langfuse-trace.js';
 import { reconcileDurableRunTerminals } from './runtimes/run-terminal-reconciliation.js';
-import { buildPromptStackTelemetry } from './prompt-telemetry.js';
-import { newInsertId, readAnalyticsContext, type AnalyticsService } from './analytics.js';
+import { createTaskObservationRolloutService } from './observability/task-observation-rollout.js';
+import { strategyTaskRunObservationId } from './observability/task-observation-aggregation.js';
+import { collectCodexChildEvidence } from './runtimes/codex-child-evidence.js';
+import {
+  collectOpenCodeChildEvidenceFacts,
+  createOpenCodeSanitizedExportLoader,
+} from './runtimes/opencode-child-evidence.js';
+import {
+  InvalidOdNextExactSendPromptError,
+  bindOdNextExactSendPromptEvidence,
+  buildPromptStackTelemetry,
+} from './prompt-telemetry.js';
+import { newInsertId, readAnalyticsContext, type AnalyticsContext, type AnalyticsService } from './analytics.js';
 import {
   agentIdToTracking,
   modelIdForTracking,
@@ -566,6 +713,11 @@ import {
 } from './routines.js';
 import { buildMcpInstallPayload } from './mcp-install-info.js';
 import { createDiagnosticsExportHandler } from './diagnostics-export.js';
+import {
+  CHAT_SCROLL_FORENSICS_PATH,
+  chatScrollForensicsBodyParser,
+  chatScrollForensicsHandler,
+} from './diagnostics-client-evidence.js';
 import { DIAGNOSTICS_EXPORT_PATH } from '@open-design/diagnostics';
 import {
   createProjectArchiveStream,
@@ -636,6 +788,8 @@ import {
   insertScheduledRoutineRun,
   insertTemplate,
   latchConversationIntentSignals,
+  latestTodoWriteInputForConversation,
+  readConversationIntentSignals,
   findTemplateByNameAndProject,
   updateTemplate,
   listProjectsAwaitingInput,
@@ -680,13 +834,17 @@ import {
   upsertDeployment,
   upsertMessage,
   upsertPreviewComment,
+  userRequestBeforeAssistantMessage,
 } from './db.js';
 import {
+  createPhysicalAgentSessionUsageTracker,
   computeIncludeStable,
   hashStableInstructions,
-  isAgentResumeFailure,
   persistCapturedAgentSession,
   resolveAgentResumeContext,
+  resolveAgentResumeFailurePolicy,
+  resolveAgentResumePromptPolicy,
+  resolveResumeContinuationSeed,
 } from './agent-session-resume.js';
 import {
   initialNativeSessionRecoveryMetadata,
@@ -724,10 +882,26 @@ import { registerPluginEventRoutes, registerPluginRoutes, registerProjectPluginR
 import { registerMcpRoutes } from './mcp-routes.js';
 import { registerXaiRoutes } from './routes/xai.js';
 import { registerLiveArtifactRoutes } from './routes/live-artifact.js';
+import { registerDeliverableSyntaxToolRoutes } from './routes/deliverable-syntax-tool.js';
 import { registerDesignSystemToolRoutes } from './routes/design-system-tool.js';
 import { registerDeployRoutes, registerDeploymentCheckRoutes } from './routes/deploy.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { registerProjectRoutes, registerProjectArtifactRoutes, registerProjectFileRoutes, registerProjectUploadRoutes, createEnforceWorkspaceProjectMutation } from './routes/project/index.js';
+import { registerProjectChatArtifactRoutes } from './routes/project/chat-artifacts.js';
+import { createChatArtifactBlobStore } from './chat-artifacts/blob-store.js';
+import { resolveChatArtifactQuota } from './chat-artifacts/quota.js';
+import {
+  resolveChatArtifactMaintenanceIntervalMs,
+  startChatArtifactMaintenance,
+} from './chat-artifacts/maintenance.js';
+import {
+  captureRunChatArtifactSnapshots,
+  type CaptureRunChatArtifactsReport,
+} from './chat-artifacts/run-capture.js';
+import { associateRunProducedFiles } from './runtimes/run-produced-files.js';
+import { chatArtifactCaptureResultProps } from './chat-artifacts/telemetry.js';
+import { freezeAndRenderChatArtifactCovers } from './chat-artifacts/cover.js';
+import { setMessageArtifactHtmlVersionIds } from './chat-artifacts/store.js';
 import { registerVelaRoutes } from './routes/vela.js';
 import { registerFinalizeRoutes, registerImportRoutes, registerProjectExportRoutes } from './import-export-routes.js';
 import { registerHandoffRoutes } from './routes/handoff.js';
@@ -735,6 +909,7 @@ import { EmptyTranscriptError, synthesizeHandoffPrompt } from './design/index.js
 import { TranscriptExportLockedError } from './transcript-export.js';
 import { registerChatRoutes } from './routes/chat.js';
 import { registerRunRoutes } from './routes/runs.js';
+import { registerStrategyRolloutRoutes } from './routes/strategy-rollout.js';
 import { registerTerminalRoutes } from './routes/terminal.js';
 import { registerBrowserSessionRoutes } from './routes/browser-sessions.js';
 import { createTerminalService } from './terminals.js';
@@ -783,6 +958,7 @@ import {
   AmrWorkspaceScopeRequiredError,
   openDesignAmrTraceEnvForRun,
   pinRunWorkspaceScopeForProject,
+  type RunWorkspaceScope,
 } from './runtimes/project-amr-trace-env.js';
 import {
   createWorkspaceDirectoryAuthorityBroker,
@@ -825,6 +1001,7 @@ import {
 } from './collab/proactive-content-pull.js';
 import {
   backgroundPullMaxEntriesFromEnv,
+  backgroundPullMaxCumulativeEntriesFromEnv,
   createBackgroundPullSizeGuard,
 } from './collab/background-pull-size-guard.js';
 import {
@@ -1189,6 +1366,11 @@ migrateLegacyDataDirSync({
   legacyDir: process.env.OD_LEGACY_DATA_DIR,
   dataDir: RUNTIME_DATA_DIR,
 });
+// Immutable chat-artifact snapshot storage. Derived from the SINGLE resolved
+// data root per the repository "Daemon data directory contract" — the store
+// itself has no default and would throw if handed anything else.
+const CHAT_ARTIFACT_BLOBS = createChatArtifactBlobStore({ dataDir: RUNTIME_DATA_DIR });
+const CHAT_ARTIFACT_QUOTA = resolveChatArtifactQuota(process.env);
 const ARTIFACTS_DIR = path.join(RUNTIME_DATA_DIR, 'artifacts');
 // Critique Theater artifacts intentionally live outside the static
 // `/artifacts` tree. The per-run artifact endpoint is the sanctioned
@@ -1587,6 +1769,7 @@ export function createAgentRuntimeEnv(
   daemonUrl: string,
   toolTokenGrant: { token?: string } | null = null,
   nodeBin: string = OD_NODE_BIN,
+  inheritedEnvironment: (baseEnv?: NodeJS.ProcessEnv) => Record<string, string> = () => ({}),
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = applySandboxRuntimeEnv(
     {
@@ -1597,6 +1780,7 @@ export function createAgentRuntimeEnv(
     },
     SANDBOX_RUNTIME,
   );
+  Object.assign(env, inheritedEnvironment(baseEnv));
   // The daemon API token authorizes the whole non-loopback API surface. Agent
   // children receive only their run-scoped tool capability, never that broad
   // credential inherited from the daemon process (including Windows casing).
@@ -1614,10 +1798,6 @@ export function createAgentRuntimeEnv(
     if (!/\.exe/i.test(pathextValue)) {
       env[pathextKey] = '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC';
     }
-  }
-  const sidecarIpcPath = baseEnv[SIDECAR_ENV.IPC_PATH];
-  if (typeof sidecarIpcPath === 'string' && sidecarIpcPath.length > 0) {
-    env[SIDECAR_ENV.IPC_PATH] = sidecarIpcPath;
   }
   if (SANDBOX_RUNTIME.enabled) {
     const noProxy = mergeNoProxyWithLoopbackDefaults(env.NO_PROXY ?? env.no_proxy);
@@ -1682,6 +1862,7 @@ export function createAgentRuntimeToolPrompt(
     '- On PowerShell use `& $env:OD_NODE_BIN $env:OD_BIN tools ...`; on cmd.exe use `"%OD_NODE_BIN%" "%OD_BIN%" tools ...`.',
     tokenLine,
     '- Prefer project wrapper commands through `OD_NODE_BIN` + `OD_BIN` over raw HTTP. The wrappers read these environment values automatically.',
+    '- For dynamic Skill reads pass --workspace "$OD_WORKSPACE_ID" --workspace-member "$OD_WORKSPACE_MEMBER_ID" (use the corresponding environment-variable syntax on other shells). This pair is pinned to this run, not the UI\'s current Workspace. Both values are empty for unbound local runs; never substitute a different Workspace or member when either is missing.',
   ].join('\n');
 }
 
@@ -1690,18 +1871,26 @@ export function createOpenDesignToolEnv({
   hyperFramesBin = resolveHyperFramesCliPath(),
   projectDir,
   projectId,
+  workspaceScope,
 }: {
   daemonUrl: string;
   hyperFramesBin?: string;
   projectDir?: string | null;
   projectId?: string | null;
+  workspaceScope?: RunWorkspaceScope | null;
 }): NodeJS.ProcessEnv {
+  const scope = workspaceScope?.projectId === projectId ? workspaceScope : null;
   return {
     OD_BIN,
     OD_DATA_DIR: RUNTIME_DATA_DIR,
     OD_HYPERFRAMES_BIN: hyperFramesBin,
     OD_NODE_BIN,
     OD_DAEMON_URL: daemonUrl,
+    // Always overwrite ambient/configured identities, including unbound runs.
+    // An older bound Run without a member keeps its Workspace id so the CLI
+    // rejects the incomplete pair rather than silently reading another library.
+    OD_WORKSPACE_ID: scope?.workspaceId ?? '',
+    OD_WORKSPACE_MEMBER_ID: scope?.workspaceId ? scope.workspaceMemberId ?? '' : '',
     ...(typeof projectId === 'string' && projectId && projectDir
       ? {
           OD_PROJECT_ID: projectId,
@@ -1743,6 +1932,10 @@ export function composeProjectDisplayStatus(
 
 const TERMINAL_RUN_STATUSES = new Set(['succeeded', 'failed', 'canceled']);
 const LANGFUSE_TERMINAL_FALLBACK_DELAY_MS = 15_000;
+// How much of a turn's visible text `run.askUserScanText` keeps: enough of the
+// head to validate a complete `<question-form>` block, which a clarification
+// turn emits near the top.
+const ASK_USER_SCAN_CAP = 256 * 1024;
 
 // Fold per-run work-completeness signals off the agent event stream (#1247 /
 // #1060). Invoked for EVERY agent event via the single emitAgentEvent choke
@@ -1753,6 +1946,13 @@ const LANGFUSE_TERMINAL_FALLBACK_DELAY_MS = 15_000;
 //   - a turn-terminal event cut off by max_tokens sets run.truncatedMidTurn, so
 //     a truncated generation is flagged incomplete regardless of its todos.
 // Never keys off a mid-turn `tool_use` pause — only turn_end / usage terminals.
+//
+// Visible TEXT is deliberately not folded here. It has a second emit path that
+// never reaches this function: `emitGuardedTextDelta` sends its guarded delta
+// straight to `send('agent', …)` (json-event-stream / copilot / ACP all go that
+// way), so a text signal folded here would silently miss whole runtime families.
+// `run.askUserScanText` is therefore accumulated inside `send` itself — the one
+// sink both paths pass through.
 function captureRunWorkCompletenessSignals(run, ev) {
   if (!run || !ev || typeof ev !== 'object') return;
   if (ev.type === 'tool_use' && isTodoWriteToolName(ev.name)) {
@@ -1929,10 +2129,64 @@ function formAnswerTransitionForCurrentPrompt(currentPrompt) {
   return lines.join('\n');
 }
 
+/**
+ * Background block that tells a FRESH session which request it is continuing.
+ *
+ * Only ever rendered for a turn whose message is a continuation directive AND
+ * whose stored session the daemon refused (see `resolveResumeContinuationSeed`).
+ * Absent for every other turn, so no existing prompt moves by a byte — and so
+ * no upstream cached prefix moves either.
+ */
+export function renderResumeContinuationContext(
+  originalRequest: string | null | undefined,
+): string | null {
+  const request = typeof originalRequest === 'string' ? originalRequest.trim() : '';
+  if (!request) return null;
+  return [
+    '## Continuing an interrupted turn',
+    'The previous attempt could not be continued in its original agent session,'
+      + ' so this is a fresh session with no memory of it. The request that turn'
+      + ' was working on:',
+    '',
+    request,
+    '',
+    'Any files it already wrote are still in the project — inspect them before'
+      + ' redoing work.',
+  ].join('\n');
+}
+
 export function composeChatUserRequestForAgent(
   message,
   currentPrompt,
-  options: { skipTranscript?: boolean } = {},
+  options: {
+    skipTranscript?: boolean;
+    /**
+     * The request a refused upstream session was working on, when this turn is
+     * a continuation directive the daemon could not resume. Rides the per-turn
+     * user body for the same reason the todo recall below does: a resumed
+     * session throws the rendered transcript away, and the system prompt is the
+     * cached stable prefix. Omitted/empty leaves the composed body unchanged.
+     */
+    resumeContinuationOriginalRequest?: string | null;
+    /**
+     * The task list an earlier turn of this conversation last declared — the
+     * WHOLE snapshot, finished rows included (see
+     * `latestTodoWriteInputForConversation` + `recalledTodosFromTodoWriteInput`).
+     * `renderUnfinishedTodoRecall` owns the question of whether any of it is
+     * still open, and renders nothing when none of it is.
+     *
+     * This is the ONLY keyhole that reaches both branches below. A resumed
+     * session throws the rendered transcript away entirely (`skipTranscript`),
+     * so anything appended to the transcript is invisible to the 6 runtimes
+     * with native resume; anything put in the system prompt moves the cached
+     * stable prefix on every turn. The per-turn user body is the one place a
+     * per-turn fact can ride for free, and `formAnswerTransitionForCurrentPrompt`
+     * below is the existing precedent for synthesizing into it.
+     *
+     * Empty/omitted MUST leave the composed body byte-identical to before.
+     */
+    previousTurnTaskList?: readonly RecalledTodo[];
+  } = {},
 ) {
   // When the adapter resumes its own session, the
   // daemon-rendered `## user` / `## assistant` transcript is a duplicate
@@ -1954,19 +2208,32 @@ export function composeChatUserRequestForAgent(
       ? bodySource
       : '(No extra typed instruction.)';
   const transition = formAnswerTransitionForCurrentPrompt(currentPrompt);
-  if (!transition) return body;
-  if (skip) {
+  // Stated before the turn's own words, the same way the form-answer transition
+  // is: it is background the agent reads first, not something the user said.
+  const recall = renderUnfinishedTodoRecall(options.previousTurnTaskList);
+  // Stated before everything else: a fresh session must learn what it is
+  // continuing before it reads the directive telling it to continue.
+  const continuationContext = renderResumeContinuationContext(
+    options.resumeContinuationOriginalRequest,
+  );
+  const parts: string[] = [];
+  if (continuationContext) parts.push(continuationContext);
+  if (recall) parts.push(recall);
+  if (!transition) {
+    parts.push(body);
+  } else if (skip) {
     // The transition block already embeds the trimmed `currentPrompt`
     // (the submitted form answers). On the resume path `body` IS
     // `currentPrompt`, so appending it would ship the answers twice
     // (issue #6239); the transition alone carries the whole turn.
-    return transition;
+    parts.push(transition);
+  } else {
+    parts.push(transition, '## Full conversation transcript', body);
   }
-  return [
-    transition,
-    '## Full conversation transcript',
-    body,
-  ].join('\n\n');
+  // With no recall block this is byte-for-byte the pre-feature result in all
+  // three branches — a conversation with nothing outstanding cannot shift a
+  // single prompt byte (and so cannot move an upstream cache boundary).
+  return parts.join('\n\n');
 }
 
 export function createFinalizedMessageTelemetryReporter({
@@ -1974,6 +2241,7 @@ export function createFinalizedMessageTelemetryReporter({
   db,
   dataDir,
   reportedRuns,
+  taskObservationRollout,
   getAppVersion = () => null,
   report = reportRunCompletedFromDaemon,
 }: {
@@ -1981,6 +2249,20 @@ export function createFinalizedMessageTelemetryReporter({
   db: unknown;
   dataDir: string;
   reportedRuns: Set<string>;
+  taskObservationRollout?: {
+    modeForRun(runId: string): 'off' | 'observe' | 'send';
+    representationForRun(runId: string):
+      | 'single_run'
+      | 'task_pending'
+      | 'task_accepted'
+      | 'task_not_expected';
+    beginFinalizeForRun(runId: string): {
+      durableTaskTruth: boolean;
+      suppressSingleRun: boolean;
+      completion: Promise<unknown>;
+    };
+    finalizeForRun(runId: string): Promise<unknown>;
+  };
   getAppVersion?: () => any;
   report?: typeof reportRunCompletedFromDaemon;
 }) {
@@ -2037,7 +2319,7 @@ export function createFinalizedMessageTelemetryReporter({
       insertId: `${runId}-langfuse-report-${reportTrigger}-${reportResult}${skipReason ? `-${skipReason}` : ''}`,
     });
   };
-  return (saved, body = {}, options = {}) => {
+  const reportFinalized = (saved, body = {}, options = {}) => {
     if (!shouldReportRunCompletedFromMessage(saved, body)) return;
     const runId = saved.runId;
     const run = design.runs.get(runId);
@@ -2079,19 +2361,125 @@ export function createFinalizedMessageTelemetryReporter({
       });
       return;
     }
-    if (reportTrigger !== 'terminal_fallback') {
-      reportedRuns.add(run.id);
+    let taskObservationMode = 'off';
+    try {
+      taskObservationMode = taskObservationRollout?.modeForRun(run.id) ?? 'off';
+    } catch (error) {
+      // Representation persistence is a best-effort optimization. A SQLite
+      // claim/insert failure must leave the ordinary single-Run obligation
+      // intact instead of aborting the reporter before it reaches that path.
+      console.warn('[telemetry] task observation representation failed', String(error));
     }
+    if (taskObservationMode === 'observe') {
+      void taskObservationRollout!.finalizeForRun(run.id).catch((error) => {
+        console.warn('[telemetry] task observation failed in observe mode', String(error));
+      });
+    } else if (taskObservationMode === 'send') {
+      let taskCompletion: Promise<unknown> | null = null;
+      try {
+        // Establish task-level durable truth before erasing the compatibility
+        // single-Run obligation. The returned completion may continue across
+        // network I/O, but the SQLite claim is already committed here.
+        const handle = taskObservationRollout!.beginFinalizeForRun(run.id);
+        if (handle.suppressSingleRun) taskCompletion = handle.completion;
+      } catch (error) {
+        // A claim/storage failure leaves this Run on the compatibility path;
+        // never suppress the only recoverable telemetry obligation.
+        console.warn('[telemetry] task observation claim failed', String(error));
+      }
+      if (!taskCompletion) {
+        // Fall through to the existing single-Run reporter below.
+      } else {
+        // The pending Task row owns this Run, but ownership alone is not a
+        // delivery checkpoint. Keep the Run unfinished until the Task is
+        // accepted/not-expected. A deterministic pre-network release removes
+        // the process-local gate and immediately resumes this same Run through
+        // the compatibility reporter.
+        reportedRuns.add(run.id);
+        void taskCompletion.then(() => {
+          if (taskObservationRollout!.representationForRun(run.id) !== 'single_run') {
+            return;
+          }
+          reportedRuns.delete(run.id);
+          reportFinalized(saved, body, options);
+        }).catch((error) => {
+          console.warn('[telemetry] task observation delivery failed', String(error));
+        });
+        return;
+      }
+    }
+    const existingDelivery = run.telemetryDelivery;
+    if (
+      existingDelivery?.status === 'in_flight'
+      || typeof existingDelivery?.finalizedAt === 'number'
+    ) {
+      reportedRuns.add(run.id);
+      const alreadyTerminal = typeof existingDelivery.finalizedAt === 'number';
+      captureResult({
+        analyticsContext: options.analyticsContext,
+        conversationId: options.conversationId ?? saved.conversationId,
+        delivery: {
+          langfuse_expected: alreadyTerminal
+            ? existingDelivery.status !== 'not_expected'
+            : true,
+          langfuse_delivery_status: alreadyTerminal
+            ? existingDelivery.status
+            : 'failed',
+          ...(alreadyTerminal && existingDelivery.dropReason
+            ? { langfuse_drop_reason: existingDelivery.dropReason }
+            : !alreadyTerminal
+              ? { langfuse_drop_reason: 'network_error' }
+              : {}),
+        },
+        projectId: options.projectId,
+        reportTrigger: options.reportTrigger,
+        reportResult: 'skipped',
+        run,
+        runId: run.id,
+        skipReason: 'duplicate_run',
+        status: saved.runStatus,
+      });
+      return;
+    }
+    const deliveryAttempt = design.runs.beginTelemetryDelivery?.(run);
+    reportedRuns.add(run.id);
     void (async () => {
       const start = Date.now();
-      const delivery = await report({
-        db,
-        dataDir,
-        run,
-        persistedRunStatus: saved.runStatus,
-        persistedEndedAt: saved.endedAt,
-        appVersion: getAppVersion(),
-      });
+      let delivery;
+      try {
+        delivery = await report({
+          db,
+          dataDir,
+          run,
+          persistedRunStatus: saved.runStatus,
+          persistedEndedAt: saved.endedAt,
+          appVersion: getAppVersion(),
+          ...(deliveryAttempt?.idempotencyKey
+            ? { deliveryIdempotencyKey: deliveryAttempt.idempotencyKey }
+            : {}),
+          ...(design.runs.recordTelemetryDeliveryAttempt
+            ? {
+                onDeliveryAttempt: () => {
+                  design.runs.recordTelemetryDeliveryAttempt(run);
+                },
+              }
+            : {}),
+        });
+      } catch {
+        // The production bridge already converts provider and assembly errors
+        // into a failed result. Keep this final guard so an injected/custom
+        // reporter cannot reject out of the detached telemetry task or leave
+        // a normal failure looking like a daemon crash window.
+        delivery = {
+          langfuse_expected: true,
+          langfuse_delivery_status: 'failed',
+          langfuse_drop_reason: 'network_error',
+          langfuse_attempt_count: 0,
+          ...(deliveryAttempt?.idempotencyKey
+            ? { langfuse_idempotency_key: deliveryAttempt.idempotencyKey }
+            : {}),
+        };
+      }
       const state = delivery ?? {
         langfuse_expected: true,
         langfuse_delivery_status: 'accepted',
@@ -2115,14 +2503,10 @@ export function createFinalizedMessageTelemetryReporter({
         skipReason: state.langfuse_expected === false ? 'not_expected' : undefined,
         status: saved.runStatus,
       });
-      if (
-        state.langfuse_expected === false
-        || state.langfuse_delivery_status === 'accepted'
-      ) {
-        design.runs.markLangfuseCompleted?.(run);
-      }
+      design.runs.finalizeTelemetryDelivery?.(run, state);
     })();
   };
+  return reportFinalized;
 }
 
 export function shouldReportRunCompletionTelemetryFallbackStatus(status: unknown): boolean {
@@ -2143,19 +2527,97 @@ function createProjectPreviewScopeRegistry() {
     }
   }
 
+  // A scope is either one-shot or reusable, and the two must never be
+  // confused. One-shot scopes belong to a single job that owns their whole
+  // lifetime -- a screenshot/PDF export mints one for the render and `revoke`s
+  // it in its `finally`. Reusable scopes belong to whatever live preview is
+  // currently showing an artifact and are released only by expiry.
+  //
+  // The distinction has to live on the ENTRY, not on the call site: `acquire`
+  // searches by (project, workspace), and an export shares that tuple with the
+  // preview it runs alongside. Without a marker, a preview could adopt an
+  // export's scope and lose it the moment that export finished.
+  function create(projectId, workspace, options, reusable) {
+    pruneExpired();
+    const scope = randomUUID();
+    const expiresAt = Date.now() + (options.ttlMs ?? PROJECT_PREVIEW_SCOPE_TTL_MS);
+    scopes.set(scope, {
+      projectId: String(projectId),
+      workspace,
+      reusable,
+      expiresAt,
+      // The expiry this scope's DOCUMENTS report, frozen at creation.
+      // `expiresAt` floats as the client renews; anything embedded in a served
+      // body must not, or the same artifact comes back with different bytes and
+      // the iframe reloads. The host only needs this as the seed for its first
+      // renewal — every renewal after that is driven by the renew response.
+      documentExpiresAt: expiresAt,
+    });
+    return scope;
+  }
+
   return {
     mint(projectId, workspace = null, options = {}) {
+      return create(projectId, workspace, options, false);
+    },
+    // Reuse the live scope for this exact (project, workspace) instead of
+    // minting a new one, and do NOT renew it while doing so. The preview
+    // transport injects the scope into a `<base href>` AND serializes its
+    // expiry into the bridge script, so anything that moves per request --
+    // a fresh id or a bumped expiry -- makes the SAME artifact serve different
+    // bytes every read: the web client rebuilds its srcDoc, React assigns a
+    // new string, and the iframe reloads; the artifact visibly disappears and
+    // comes back (OPEND-2283). `options.ttlMs` applies only to a scope this
+    // call has to create; keeping one alive is `renew`'s job.
+    //
+    // Deliberately NOT folded into `mint`: export flows mint a scope and
+    // `revoke` it when the render finishes, and sharing one id with a live
+    // preview would revoke the preview out from under it. That is why only
+    // entries this method created are eligible below -- see `create`.
+    acquire(projectId, workspace = null, options = {}) {
       pruneExpired();
-      const scope = randomUUID();
-      scopes.set(scope, {
-        projectId: String(projectId),
-        workspace,
-        expiresAt: Date.now() + (options.ttlMs ?? PROJECT_PREVIEW_SCOPE_TTL_MS),
-      });
-      return scope;
+      const wantedProject = String(projectId);
+      const wantedWorkspace = workspace
+        ? `${workspace.workspaceId}\u0000${workspace.workspaceMemberId}`
+        : '';
+      for (const [scope, entry] of scopes) {
+        // A one-shot scope's owner will revoke it; adopting it here would let
+        // that teardown blank a preview that is still using it.
+        if (entry.reusable !== true) continue;
+        if (entry.projectId !== wantedProject) continue;
+        const entryWorkspace = entry.workspace
+          ? `${entry.workspace.workspaceId}\u0000${entry.workspace.workspaceMemberId}`
+          : '';
+        if (entryWorkspace !== wantedWorkspace) continue;
+        // Deliberately does NOT renew `expiresAt`. The expiry is serialized
+        // into the bridge script of the document this scope is about to be
+        // injected into, so bumping it here changes the served bytes on every
+        // read -- which reloads the iframe just as surely as a fresh scope id
+        // would, defeating the whole point of reusing one. Lifetime extension
+        // has its own path: the client renews explicitly
+        // (`x-od-preview-scope-renewal`), and that response is not a document.
+        return scope;
+      }
+      return create(projectId, workspace, options, true);
     },
     revoke(scope) {
       scopes.delete(String(scope || ''));
+    },
+    /**
+     * The expiry to embed in a served document. Stable for the scope's whole
+     * life, unlike `expiresAt`, which renewal moves. JSON responses should
+     * keep using `expiresAt`; only bodies whose bytes must not change use this.
+     */
+    documentExpiresAt(projectId, scope) {
+      const key = String(scope || '');
+      const entry = scopes.get(key);
+      if (!entry) return undefined;
+      if (entry.expiresAt <= Date.now()) {
+        scopes.delete(key);
+        return undefined;
+      }
+      if (entry.projectId !== String(projectId)) return undefined;
+      return entry.documentExpiresAt ?? entry.expiresAt;
     },
     expiresAt(projectId, scope) {
       const key = String(scope || '');
@@ -2283,7 +2745,29 @@ function rewriteKnownAgentStreamError(agentId, message, failureText = '') {
   ) {
     return 'The run failed due to an unknown upstream streaming error. Please retry.';
   }
+  // An ACP handshake refusal that reaches one of the stderr-tail fallbacks is
+  // deliberately NOT reworded here. The daemon has no locale, so a sentence
+  // composed at this layer lands in `run.error` untranslated and the chat
+  // renders it verbatim. The failure is NAMED instead: each `send('error', …)`
+  // below wraps its payload in `withAcpHandshakeFailureGuidance`, which stamps
+  // `AGENT_CLI_SESSION_REFUSED` plus the runtime identity and leaves the
+  // agent's own line alone.
   return rawMessage;
+}
+
+/**
+ * The runtime identity a failure ships as structured data: the runtime's
+ * display name, which is the one fact the localized copy interpolates.
+ *
+ * Read straight off the already-resolved `RuntimeAgentDef` — a pure lookup on
+ * a value this run resolved before it spawned, so naming the failure adds no
+ * work and no waiting to the failure path.
+ *
+ * @param def - The resolved `RuntimeAgentDef` for this run.
+ * @returns An `AcpAgentIdentity`, with `null` when the runtime is unknown.
+ */
+function agentFailureIdentity(def) {
+  return { agentName: def?.name ?? null };
 }
 
 function createAmrModelUnavailablePayload(model, init = {}) {
@@ -2548,6 +3032,7 @@ export function createSseResponse(
 }
 
 export type DesktopPdfExporter = (input: DesktopExportPdfInput) => Promise<DesktopExportPdfResult>;
+export type DesktopFrameRenderer = (input: DesktopRenderFramesInput) => Promise<DesktopRenderFramesResult>;
 export type DesktopSlideRenderer = (input: DesktopRenderSlidesInput) => Promise<DesktopRenderSlidesResult>;
 export type DesktopArtifactExporter = (input: DesktopExportArtifactInput) => Promise<DesktopExportArtifactResult>;
 
@@ -2564,6 +3049,7 @@ export interface DaemonRuntimeContext {
 
 export interface StartServerOptions {
   desktopArtifactExporter?: DesktopArtifactExporter | null;
+  desktopFrameRenderer?: DesktopFrameRenderer | null;
   desktopPdfExporter?: DesktopPdfExporter | null;
   desktopSlideRenderer?: DesktopSlideRenderer | null;
   host?: string;
@@ -2571,6 +3057,25 @@ export interface StartServerOptions {
   returnServer?: boolean;
   runtime?: DaemonRuntimeContext | null;
   staticDir?: string;
+  /** Opaque child-process environment supplied by the runtime integration seam. */
+  inheritedEnvironment?: (baseEnv?: NodeJS.ProcessEnv) => Record<string, string>;
+  /** Daemon-owned host capability facts. HTTP/model output cannot populate it. */
+  odNextExecutionPreflightResolver?: OdNextExecutionPreflightResolver | null;
+  /**
+   * Daemon-owned, runtime-neutral capability/Child facts for complex OD Next
+   * Production. Runtime adapters normalize their native events before this
+   * boundary; HTTP bodies, assistant prose, and raw stdout are never inputs.
+   */
+  odNextComplexProductionResolver?: OdNextComplexProductionResolver | null;
+}
+
+export function startAmrTerminalReportDeliveryAfterBind(
+  delivery: Pick<AmrTerminalReportDeliveryService, 'start'>,
+  boundPort: number | null,
+): boolean {
+  if (!Number.isInteger(boundPort) || Number(boundPort) <= 0) return false;
+  delivery.start();
+  return true;
 }
 
 export interface StartServerResult {
@@ -2585,10 +3090,14 @@ export async function startServer({
   host = normalizeDaemonBindHost(process.env.OD_BIND_HOST),
   returnServer = false,
   desktopPdfExporter = null,
+  desktopFrameRenderer = null,
   desktopSlideRenderer = null,
   desktopArtifactExporter = null,
   runtime = null,
   staticDir = STATIC_DIR,
+  inheritedEnvironment = () => ({}),
+  odNextExecutionPreflightResolver = null,
+  odNextComplexProductionResolver = null,
 }: StartServerOptions = {}) {
   host = normalizeDaemonBindHost(host);
   let resolvedPort = port;
@@ -2639,6 +3148,15 @@ export async function startServer({
   // wall — well past 4mb for image/markup-heavy sites. Give it a dedicated limit
   // (registered before the global parser so it claims the body first).
   app.use('/api/brands/:id/extract-from-html', express.json({ limit: '32mb' }));
+  // A chat-scroll forensics capture carries the chat log's full `outerHTML`,
+  // and the envelope carries two of them (`live` + `retained`), each truncated
+  // renderer-side at 8MB. Registered here for the same reason as the two above
+  // — the route itself is declared far below, and by then the global parser has
+  // already read and refused the body. The endpoint exists to collect the
+  // longest transcripts, so leaving it on the 4mb ceiling made it blind to
+  // exactly the incidents it was built for, and silently: the uploader reports
+  // `res.ok` and the export continues without the evidence.
+  app.use(CHAT_SCROLL_FORENSICS_PATH, chatScrollForensicsBodyParser);
   app.use(express.json({ limit: '4mb' }));
   const projectPreviewScopes = createProjectPreviewScopeRegistry();
 
@@ -2902,6 +3420,11 @@ export async function startServer({
     next();
   });
   const db = openDatabase(PROJECT_ROOT, { dataDir: RUNTIME_DATA_DIR });
+  const amrTerminalReportOutbox = createAmrTerminalReportOutboxStore(db);
+  const amrTerminalReportDelivery = createAmrTerminalReportDeliveryService({
+    store: amrTerminalReportOutbox,
+    env: { ...process.env, OD_DATA_DIR: RUNTIME_DATA_DIR },
+  });
   const commentAnchorRepair = repairTeamProjectCommentAnchorConversations(db);
   if (commentAnchorRepair.created > 0) {
     console.warn(
@@ -2997,6 +3520,30 @@ export async function startServer({
   for (const row of listRecentMediaTasks(db, { terminalTtlMs: TASK_TTL_AFTER_DONE_MS })) {
     mediaTaskStore.hydrateMediaTask(row);
   }
+
+  // Chat-artifact snapshot maintenance: one pass now, then a pass per period
+  // for as long as the daemon lives. Blob-store initialization is deliberately
+  // separate from the SQLite migration and never blocks startup: a broken
+  // snapshot store must degrade the cards, not the daemon.
+  //
+  // The period defaults to 0 (boot-only, today's behaviour) because no period
+  // has been ruled on yet — see `resolveChatArtifactMaintenanceIntervalMs`.
+  const chatArtifactMaintenance = startChatArtifactMaintenance({
+    db,
+    blobs: CHAT_ARTIFACT_BLOBS,
+    quota: CHAT_ARTIFACT_QUOTA,
+    resolveSourcePath: (projectId, relativePath) => {
+      try {
+        const project = getProject(db, projectId);
+        const dir = resolveProjectDir(PROJECTS_DIR, projectId, project?.metadata);
+        return path.join(dir, relativePath.split('/').join(path.sep));
+      } catch {
+        return null;
+      }
+    },
+    gcDryRun: process.env.OD_CHAT_ARTIFACT_GC !== '1',
+    intervalMs: resolveChatArtifactMaintenanceIntervalMs(process.env),
+  });
 
   if (process.env.OD_CODEX_DISABLE_PLUGINS === '1') {
     console.log('[od] Codex plugins disabled via OD_CODEX_DISABLE_PLUGINS=1');
@@ -4049,16 +4596,6 @@ export async function startServer({
       scope,
     );
   };
-  const teamProjectsForRequest = async (
-    context: WorkspaceCollabContext,
-  ): Promise<TeamProject[]> =>
-    withoutLocallyUnsharedProjects(
-      await teamProjectsLister(context.workspaceId),
-      {
-        workspaceId: context.workspaceId,
-        workspaceMemberId: context.workspaceMemberId,
-      },
-    );
   /**
    * Non-destructive quarantine marker for a pulled Team mirror. The binding
    * state is the central data-plane gate; the project metadata marker also
@@ -4789,6 +5326,7 @@ export async function startServer({
   // behavior. See collab/background-pull-size-guard.ts.
   const backgroundPullSizeGuard = createBackgroundPullSizeGuard({
     maxEntries: backgroundPullMaxEntriesFromEnv(),
+    maxCumulativeEntries: backgroundPullMaxCumulativeEntriesFromEnv(),
     inspect: (scope, version) =>
       inspectAuthorizedTeamProjectPull({
         projectId: scope.projectId,
@@ -4802,7 +5340,7 @@ export async function startServer({
       }),
     onDeferred: (info) => {
       console.info(
-        '[od] background shared-project pull deferred (oversized): ' +
+        `[od] background shared-project pull deferred (${info.reason}): ` +
           `projectId=${info.projectId} workspaceId=${info.workspaceId} ` +
           `version=${info.version} entries=${info.entryCount} ` +
           `maxEntries=${info.maxEntries}; opening the project pulls it on demand`,
@@ -4932,8 +5470,16 @@ export async function startServer({
           onTiming: emitSharedProjectPullTiming,
         }
       : {}),
-    onError: (error) =>
-      console.warn('[od] proactive shared-project pull failed (web polling remains the fallback):', String(error)),
+    // A cancelled `vela` child is this scheduler's own doing, not a fault: it
+    // aborts the in-flight pull when a higher published version supersedes it
+    // (`mergeIntentUpdate`) or when the intent is cleared (`clearIntent`).
+    // Reporting those as failures put a fault-shaped warning in the log on
+    // ordinary version churn. `proactive-content-pull.ts` stays dependency-free
+    // by design, so the distinction is drawn here, at its only error sink.
+    onError: (error) => {
+      if (isAbortedOperationError(error)) return;
+      console.warn('[od] proactive shared-project pull failed (web polling remains the fallback):', String(error));
+    },
     onCatchUp: (event) => {
       if (
         event.phase === 'retry-scheduled' ||
@@ -4959,12 +5505,23 @@ export async function startServer({
         );
         return;
       }
+      // `candidates` counts projects CONSIDERED, which is not what the
+      // background lanes cost a member: a sweep with candidates=25 says
+      // nothing about whether 25 files or 25,000 landed on their disk. The
+      // `process*` fields below are this daemon process's running totals (not
+      // this sweep's), and they are the reading that makes
+      // OD_COLLAB_BACKGROUND_PULL_MAX_CUMULATIVE_ENTRIES choosable from a
+      // diagnostics bundle instead of from a synthetic workspace.
+      const backgroundVolume = backgroundPullSizeGuard.volume();
       console.info(
         `[od] shared-project content catch-up completed mode=${event.mode} lane=${event.lane} ` +
           `workspaceId=${event.workspaceId ?? 'unknown'} scanned=${event.scanned ?? 0} ` +
           `candidates=${event.candidates ?? 0} headChecks=${event.headChecks ?? 0} ` +
           `heads=${event.heads ?? 0} ` +
-          `suppressed=${event.suppressed ?? 0} complete=${event.complete === true}`,
+          `suppressed=${event.suppressed ?? 0} complete=${event.complete === true} ` +
+          `processEntries=${backgroundVolume.entries} ` +
+          `processProjects=${backgroundVolume.countedProjects} ` +
+          `processUncounted=${backgroundVolume.uncountedProjects}`,
       );
     },
   });
@@ -5170,7 +5727,29 @@ export async function startServer({
     // request and re-ran the one-off `vela team-projects --help` capability
     // probe — an extra CLI spawn (and, on the current CLI, a blocking analytics
     // POST) on every workspace projects load.
-    listTeamProjects: teamProjectsForRequest,
+    //
+    // Use the DISPLAY cache, not the uncached exact lookup. This is the read
+    // behind the Home team-project grid and the deep-link "is this shared to my
+    // team?" check, and `teamProjectsDisplayCache` was built for exactly this
+    // route — see its doc comment, which names it. Wired to the uncached lister
+    // instead, every call spawned `vela team-projects list`: measured at ~1.1s
+    // per request against a live workspace, cold and warm alike, on a path the
+    // UI hits on every launch and every deep link.
+    //
+    // These routes are display reads: the Home team-project grid and the
+    // deep-link "is this shared to my team?" check. Nothing here gates data
+    // access — the pull gate and the comment/presence relays reach
+    // `teamProjectsLister` on their own and still observe an unshare
+    // immediately.
+    //
+    // Display freshness does not rest on the 3s TTL alone: share, unshare and
+    // workspace-change invalidate this cache explicitly, via
+    // `invalidateTeamProjectCatalog` (collab-sync and the project routes) and
+    // the per-scope invalidations beside the cache itself.
+    //
+    // This was the last caller of the uncached `teamProjectsForRequest`
+    // wrapper, so that helper is removed with it rather than left orphaned.
+    listTeamProjects: teamProjectsForDisplay,
     // Expose the collab-cloud member directory so the web client can resolve
     // comment authors + owner names to a name + role.
     ...(teamMembersCache ? { listMembers: teamMembersForDisplay } : {}),
@@ -7150,16 +7729,38 @@ export async function startServer({
 
   const telemetry = registerTelemetryRoutes(app, {
     dataDir: RUNTIME_DATA_DIR,
+    namespace: runtime?.namespace,
     readAppConfig,
     writeAppConfig,
   });
+  const resolvedAppVersionInfo = normalizeTelemetryAppVersionInfo(
+    await telemetry.resolveAppVersion(),
+  );
+  const currentAppVersionInfo = () =>
+    normalizeTelemetryAppVersionInfo(telemetry.getCachedAppVersion())
+    ?? resolvedAppVersionInfo;
+  const currentAppVersion = () =>
+    currentAppVersionInfo()?.version ?? UNKNOWN_APP_VERSION;
   const { analyticsService } = telemetry;
+  registerStrategyRolloutRoutes(app, {
+    requireLocalDaemonRequest,
+    // Uncaught on purpose: an operator asking which mode is in effect must get
+    // an error when the config cannot be read, never `off` / `default`.
+    readOdNextPreference: () => readAppConfig(RUNTIME_DATA_DIR),
+  });
   workspaceAnalyticsService = analyticsService;
+  console.info(
+    '[telemetry] effective run sink',
+    describeRunTelemetrySink(
+      readRunTelemetrySinkConfig(process.env, configuredAmrEnv()),
+    ),
+  );
   const design = {
     runs: createChatRunService({
       createSseResponse,
       createSseErrorPayload,
       runsLogDir: path.join(RUNTIME_DATA_DIR, 'runs'),
+      getAppVersionInfo: currentAppVersionInfo,
       // Fold committed side effects into a truncation-proof per-run ledger as
       // each event is emitted, so the finalization verdict (retry safety gate,
       // artifact_count, close-status artifactProducedThisRun) does not depend on
@@ -7167,12 +7768,70 @@ export async function startServer({
       onEventEmitted: (run, record) => {
         if (!run.sideEffectLedger) run.sideEffectLedger = createRunSideEffectLedger();
         foldEventIntoRunSideEffectLedger(run.sideEffectLedger, record);
+        const data = record.data && typeof record.data === 'object' && !Array.isArray(record.data)
+          ? record.data
+          : null;
+        const promptBudget = data
+          ? promptBudgetAnalyticsFromDiagnostic(data as Record<string, unknown>)
+          : null;
+        if (promptBudget) run.promptBudgetDiagnostics = promptBudget;
+      },
+      onTerminal: createAmrTerminalReportFinalizer(amrTerminalReportOutbox),
+      beforeFinish: (run, status, _code, _signal, terminalAt) => {
+        if (run.deliverableSyntaxValidation?.metrics) {
+          run.deliverableSyntaxValidation = {
+            ...run.deliverableSyntaxValidation,
+            metrics: recordDeliverableSyntaxDelivery({
+              previous: run.deliverableSyntaxValidation.metrics,
+              terminalAtMs: terminalAt,
+            }),
+          };
+        }
+        if (status !== 'failed' && status !== 'canceled') return;
+        try {
+          reconcileStrategyTaskRunTerminal(db, { runId: run.id, status });
+          const latestTask = getStrategyTaskExecutionByRunId(db, run.id);
+          if (latestTask) run.strategyTask = projectStrategyTask(latestTask, run.id);
+        } catch (error) {
+          if (!(error instanceof InvalidFrozenSkillPackageError)) throw error;
+          // The Run is already failing closed for the corrupt task state. Do
+          // not let terminal reconciliation throw and prevent persistence of
+          // that failure, and never attempt any live Skill reconstruction.
+        }
       },
     }),
     analytics: analyticsService,
-    getAppVersion: () => telemetry.getCachedAppVersion()?.version ?? '0.0.0',
+    getAppVersion: currentAppVersion,
     readAnalyticsContext,
   };
+  const taskObservationRollout = createTaskObservationRolloutService({
+    db,
+    dataDir: RUNTIME_DATA_DIR,
+    getRun: (runId) => design.runs.get(runId),
+    readTelemetry: async () => {
+      const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
+      return {
+        prefs: appConfig.telemetry ?? {},
+        installationId: appConfig.installationId ?? null,
+        appVersionInfo: telemetry.getCachedAppVersion(),
+      };
+    },
+    checkpointMappedRun: (runId, reason) => {
+      const mappedRun = design.runs.get(runId);
+      if (!mappedRun) return;
+      design.runs.beginTelemetryDelivery?.(mappedRun);
+      design.runs.finalizeTelemetryDelivery?.(mappedRun, {
+        langfuse_expected: false,
+        langfuse_delivery_status: 'not_expected',
+        langfuse_drop_reason: reason,
+        langfuse_attempt_count: 0,
+      });
+    },
+  });
+  console.info(
+    '[telemetry] effective task observation rollout',
+    taskObservationRollout.diagnostic(),
+  );
 
   // Runs are process-local, but their terminal obligations are durable. On a
   // fresh daemon boot, repair stale message rows and replay any PostHog or
@@ -7180,14 +7839,29 @@ export async function startServer({
   // stays off the startup critical path.
   void reconcileDurableRunTerminals({
     analytics: analyticsService,
-    appVersion: telemetry.getCachedAppVersion()?.version ?? '0.0.0',
-    appVersionInfo: telemetry.getCachedAppVersion(),
+    appVersion: currentAppVersion(),
+    appVersionInfo: currentAppVersionInfo(),
     db,
     reportLangfuse: reportRunCompletedFromDaemon,
+    finalizeTerminalLocally: createAmrTerminalReportFinalizer(amrTerminalReportOutbox),
+    taskObservationModeForRun: (runId) => taskObservationRollout.modeForRun(runId),
+    taskObservationRepresentationForRun: (runId) =>
+      taskObservationRollout.representationForRun(runId),
+    taskObservationNotExpectedReasonForRun: (runId) =>
+      taskObservationRollout.notExpectedReasonForRun(runId),
+    seedTaskObservationRunFact: (runId, fact) =>
+      taskObservationRollout.seedRepresentationFromRunFact(runId, fact),
+    beginTaskObservationForRun: (runId) => taskObservationRollout.beginFinalizeForRun(runId),
     runsLogDir: path.join(RUNTIME_DATA_DIR, 'runs'),
-  }).then((reconciled) => {
+  }).then(async (reconciled) => {
     if (reconciled.interrupted > 0 || reconciled.messagesReconciled > 0) {
       console.warn('[runs] reconciled interrupted run terminals', reconciled);
+    }
+    const taskObservationsRecovered = await taskObservationRollout.reconcileCrashWindows();
+    if (taskObservationsRecovered > 0) {
+      console.warn('[telemetry] reconciled task observation crash windows', {
+        recovered: taskObservationsRecovered,
+      });
     }
   }).catch((error) => {
     console.warn('[runs] terminal reconciliation failed', error);
@@ -7199,16 +7873,18 @@ export async function startServer({
   const browserSessionService = createBrowserSessionService();
 
   // Tracks runs whose finalized assistant message has already been forwarded
-  // to Langfuse so repeated message updates only emit one final trace per run.
-  // Terminal fallback reports intentionally do not claim this set; a delayed
-  // telemetry-finalized message can still replace the synthetic fallback.
+  // so repeated message updates only enter the reporter once. Terminal
+  // fallback and delayed final-message writes share this process-local gate;
+  // the durable delivery terminal keeps the same guarantee across restarts.
   const reportedRuns = new Set();
+  const terminalTelemetryFallbackTimers = new Set<ReturnType<typeof setTimeout>>();
 
   const reportFinalizedMessage = createFinalizedMessageTelemetryReporter({
     design,
     db,
     dataDir: RUNTIME_DATA_DIR,
     reportedRuns,
+    taskObservationRollout,
     getAppVersion: telemetry.getCachedAppVersion,
   });
   const reportRunCompletionTelemetryFallback = ({
@@ -7222,6 +7898,7 @@ export async function startServer({
   }) => {
     if (!shouldReportRunCompletionTelemetryFallbackStatus(status)) return;
     const timer = setTimeout(() => {
+      terminalTelemetryFallbackTimers.delete(timer);
       if (reportedRuns.has(run.id)) return;
       if (run.assistantMessageId) {
         const messageTelemetry = getMessageTelemetryFinalizationState(db, run.assistantMessageId);
@@ -7245,9 +7922,33 @@ export async function startServer({
         },
       );
     }, LANGFUSE_TERMINAL_FALLBACK_DELAY_MS);
+    terminalTelemetryFallbackTimers.add(timer);
     timer.unref?.();
   };
 
+  // Every physical Run is started through this service so the analytics
+  // lifecycle is installed once, for whoever asked for the Run — an HTTP
+  // client, an OD Next automatic continuation, a scheduled Automation, or a
+  // live-artifact refresh. Starting a Run any other way drops its analytics
+  // silently, which is what OPEND-2365 was.
+  const runAnalyticsLifecycle = createRunAnalyticsLifecycle({
+    db,
+    design,
+    paths: { PROJECTS_DIR, RUNTIME_DATA_DIR },
+    agents: { detectAgents },
+    telemetry: {
+      reportRunCompletionTelemetryFallback,
+      resolveRunProjectKindForAnalytics,
+      runArtifactBaselines,
+      runRetryEventsForAnalytics,
+    },
+  });
+  const internalRunCreation = createInternalRunCreationService({
+    runs: design.runs,
+    claimAssistantMessage: (run, options) =>
+      pinAssistantMessageOnRunCreate(db, run, options),
+    analyticsLifecycle: runAnalyticsLifecycle,
+  });
   const reportFeedback = telemetry.reportFeedback;
 
   // DNS-aware wrapper. The sync `validateBaseUrl` only inspects the literal
@@ -7307,7 +8008,26 @@ export async function startServer({
 
   app.get('/api/health', async (_req, res) => {
     const versionInfo = await readCurrentAppVersionInfo();
-    res.json({ ok: true, version: versionInfo.version });
+    const {
+      pending,
+      delivered,
+      unsupported,
+      terminalFailed,
+      oldestPendingAgeMs,
+    } = amrTerminalReportOutbox.diagnostics();
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      version: versionInfo.version,
+      amrTerminalReporter: {
+        status: 'active',
+        pending,
+        delivered,
+        unsupported,
+        terminalFailed,
+        oldestPendingAgeMs,
+      },
+    });
   });
 
   app.get('/api/ready', async (_req, res) => {
@@ -7322,7 +8042,24 @@ export async function startServer({
 
   app.get('/api/version', async (_req, res) => {
     const version = await readCurrentAppVersionInfo();
-    res.json({ version });
+    // Now that this payload carries a runtime capability it is no longer a
+    // near-static fact about the build: the same URL answers differently
+    // depending on which daemon is behind it. A cached response therefore
+    // outlives the daemon that produced it, and a stale `slideRenderer: true`
+    // is consumed as authoritative — reopening the export the gate exists to
+    // hide. Must not be cached anywhere.
+    res.setHeader('Cache-Control', 'no-store');
+    // Runtime capabilities ride along on the version payload rather than a
+    // dedicated endpoint: this is already the "what runtime am I talking to"
+    // channel (packaged/channel/platform/arch), the web fetches it once at
+    // boot, and computing the flag from the very binding the export routes
+    // guard on means the advertisement cannot drift from the 501 they return.
+    res.json({
+      version: {
+        ...version,
+        capabilities: { slideRenderer: typeof desktopSlideRenderer === 'function' },
+      },
+    });
   });
 
   // Powered-preview isolation info. Reports the daemon's own directly-reachable
@@ -7388,11 +8125,34 @@ export async function startServer({
     composio: composioConnectorProvider,
   });
 
+  // Detailed terminal-report activity is local diagnostics, not public health.
+  app.get(
+    '/api/diagnostics/amr-terminal-reports',
+    requireLocalDaemonRequest,
+    (_req, res) => res.json(amrTerminalReportOutbox.diagnostics()),
+  );
+
   // Gate the diagnostics export behind requireLocalDaemonRequest so it stays
   // unreachable when daemon binds to a non-loopback address (Tailscale,
   // 0.0.0.0, etc.). The bundle contains daemon/web/desktop logs, host
   // metadata, and crash reports — same threat tier as connector / live-
   // artifact endpoints, which all use the same guard.
+  // Renderer-side chat-scroll evidence, pushed just before an export is
+  // requested. Same guard and same threat tier as the export itself: the body
+  // carries the chat log's DOM. Not a user-facing capability — it is the
+  // renderer half of `od diagnostics export`, which already exists on both
+  // surfaces — so it gets no CLI subcommand of its own.
+  //
+  // The 24mb body parser is NOT in this chain: a route-level parser cannot
+  // reach a body the app-level 4mb parser has already read, so it is mounted
+  // next to the other oversized-body routes, ahead of the global one. Naming it
+  // here as well would only make it look like this line is what sizes the route.
+  app.post(
+    CHAT_SCROLL_FORENSICS_PATH,
+    requireLocalDaemonRequest,
+    chatScrollForensicsHandler,
+  );
+
   app.get(
     DIAGNOSTICS_EXPORT_PATH,
     requireLocalDaemonRequest,
@@ -7575,7 +8335,7 @@ export async function startServer({
     AUDIO_DURATIONS_SEC,
     readMaskedConfig,
     writeConfig,
-    generateMedia,
+    generateMedia: (args) => generateMedia({ ...args, desktopFrameRenderer }),
     mediaTasks: mediaTaskStore.mediaTasks,
     createMediaTask: mediaTaskStore.createMediaTask,
     persistMediaTask: mediaTaskStore.persistMediaTask,
@@ -7665,7 +8425,7 @@ export async function startServer({
   registerMcpRoutes(app, {
     http: httpDeps,
     paths: pathDeps,
-    mcp: { pendingAuth: mcpPendingAuth, daemonUrlRef },
+    mcp: { pendingAuth: mcpPendingAuth, daemonUrlRef, inheritedEnvironment },
   });
   registerXaiRoutes(app, {
     http: httpDeps,
@@ -7796,7 +8556,7 @@ export async function startServer({
         await analyticsService.capture({
           eventName,
           context: analyticsContext,
-          appVersion: telemetry.getCachedAppVersion()?.version ?? '0.0.0',
+          appVersion: currentAppVersion(),
           properties,
           insertId: newInsertId(),
         });
@@ -8200,6 +8960,29 @@ export async function startServer({
     authorizeProjectRequest,
     authorizeProjectToolRequest,
   });
+  registerDeliverableSyntaxToolRoutes(app, {
+    projectsRoot: PROJECTS_DIR,
+    authorizeToolRequest,
+    authorizeProjectToolRequest,
+    getProject: (id: string) => getProject(db, id),
+    getRun: (id: string) => design.runs.get(id),
+    persistRunState: (run) => design.runs.persistState(run),
+    relatedPathsForRun: async ({ runId, projectRoot }) => {
+      const baseline = runArtifactBaselines.peek(runId);
+      if (
+        !baseline
+        || baseline.contended
+        || path.resolve(baseline.cwd) !== path.resolve(projectRoot)
+      ) {
+        return [];
+      }
+      const current = await snapshotProjectArtifactsAsync(projectRoot);
+      return diffRunArtifacts(
+        baseline.before,
+        current,
+      ).renderDependencyTouchedPaths;
+    },
+  });
   registerDesignSystemToolRoutes(app, {
     auth: authDeps,
     http: httpDeps,
@@ -8280,6 +9063,15 @@ export async function startServer({
     artifacts: artifactDeps,
     projectPreviewScopes,
     verifyWorkspaceRequestAuthority,
+  });
+  // Immutable chat-artifact snapshot reads. Same read authority as /raw; see
+  // routes/project/chat-artifacts.ts for the gate chain.
+  registerProjectChatArtifactRoutes(app, {
+    db,
+    http: httpDeps,
+    paths: pathDeps,
+    projectStore: projectStoreDeps,
+    authorizeProjectRequest,
   });
 
   registerMediaRoutes(app, {
@@ -8830,6 +9622,11 @@ export async function startServer({
     freeformDeckSignal,
     mediaHintSignal,
     platformHintSignal,
+    devicePlatformSignal = null,
+    frozenSkillPackage,
+    odNextSyntheticCanary = false,
+    odNextAutomaticAdmission = false,
+    runtimeCapabilitySnapshot,
   }) => {
     const project =
       typeof projectId === 'string' && projectId
@@ -8864,7 +9661,6 @@ export async function startServer({
     // transitioning; the daemon persists the local catalogue partition so
     // the first run reads the same local record without waiting for identity
     // discovery or treating this as remote membership authority.
-    const skillCatalogScope = localCatalogScope(metadata?.localCatalogScopes?.skill);
     const designSystemCatalogScope = localCatalogScope(
       metadata?.localCatalogScopes?.designSystem,
     );
@@ -8937,8 +9733,9 @@ export async function startServer({
         );
       }
     }
-    const effectiveSkillId =
-      typeof skillId === 'string' && skillId ? skillId : project?.skillId;
+    const effectiveSkillId = frozenSkillPackage
+      ? null
+      : typeof skillId === 'string' && skillId ? skillId : project?.skillId;
     // Website Clone runs reproduce someone else's site: the fidelity target
     // is the original page. Treating a project/app design system as
     // authoritative would overwrite the cloned site's palette/typography
@@ -8964,17 +9761,12 @@ export async function startServer({
       typeof projectId === 'string' && projectId
         ? getWorkspaceProjectByProjectId(db, projectId)
         : null;
-    const skillResourceScope = skillCatalogScope ?? (
-      projectResourceScope?.workspaceId
-        ? {
-            workspaceId: String(projectResourceScope.workspaceId),
-            workspaceMemberId:
-              typeof projectResourceScope.createdByWorkspaceMemberId === 'string'
-                ? projectResourceScope.createdByWorkspaceMemberId
-                : null,
-          }
-        : null
-    );
+    // Shared with OD Next's frozen-package capture so a Skill this prompt can
+    // resolve is a Skill that route can freeze, and vice versa.
+    const skillResourceScope = resolveSkillCatalogScope({
+      metadata,
+      workspaceBinding: projectResourceScope,
+    });
     let allSkillsPromise: ReturnType<typeof listAllSkillLikeEntries> | null = null;
     const loadAllSkills = async () => {
       allSkillsPromise ??= skillResourceScope
@@ -8990,7 +9782,9 @@ export async function startServer({
       typeof effectiveSkillId === 'string' && effectiveSkillId
         ? resolveSkillId(effectiveSkillId)
         : null;
-    const adHocSkillIds = Array.isArray(skillIds)
+    const adHocSkillIds = frozenSkillPackage
+      ? []
+      : Array.isArray(skillIds)
       ? skillIds
           .map((s) => (typeof s === 'string' ? s.trim() : ''))
           .filter(Boolean)
@@ -9209,6 +10003,7 @@ export async function startServer({
     if (appConfigForPrompt?.customInstructions) {
       userInstructions = appConfigForPrompt.customInstructions;
     }
+    const projectInstructions = project?.customInstructions ?? '';
 
     let designSystemBody;
     let designSystemTitle;
@@ -9459,12 +10254,31 @@ export async function startServer({
       try {
         const snap = getSnapshot(db, appliedPluginSnapshotId);
         const stages = snap?.pipeline?.stages ?? [];
-        if (stages.length > 0) {
+        // Strategy snapshots use the strict loader below, after their exact
+        // pipeline and package binding have been revalidated. Keep this
+        // legacy warn/fallback path only for ordinary snapshots.
+        if (!snap?.strategy && stages.length > 0) {
           const { loadAtomBodies } = await import('./plugins/atom-bodies.js');
           const { renderActiveStageBlocks } = await import('@open-design/contracts');
+          const { atomsForPrompt } = await import('./plugins/critique-prompt-gate.js');
           const stageViews = [];
           for (const stage of stages) {
-            const bodies = await loadAtomBodies(db, stage.atoms ?? []);
+            /*
+             * 评审剧场的 atom body 必须和**协议注入**同生同死。
+             *
+             * 默认 scenario 的 `critique` 阶段一直声明 `atoms: ['critique-theater']`,
+             * 而 2026-08-26 下线剧场时只关掉了协议注入(`renderPanelPrompt`)那一条路。
+             * 结果是模型读到一段自相矛盾的提示词:「严格遵守 daemon 注入的标记协议」,
+             * 而那份协议永远不会来 —— 于是它照着 atom SKILL.md 的散文把线格式现编出来,
+             * 原样打进聊天正文。用户连着撞到五次。详见 `critique-prompt-gate.ts`。
+             *
+             * `critiqueShouldRun` 就是"协议会不会注入"的答案,这里直接复用它,
+             * 不另起一套判据 —— 另起一套就是第三个入口。
+             */
+            const atoms = atomsForPrompt(stage.atoms ?? [], {
+              critiqueEnabled: critiqueShouldRun,
+            });
+            const bodies = await loadAtomBodies(db, atoms);
             stageViews.push({ stageId: stage.id, bodies });
           }
           // Issue #6238 — the builder inlines each atom body exactly
@@ -9478,11 +10292,31 @@ export async function startServer({
       }
     }
 
+    // Strategy identity, package/profile drift checks, atom loading, runtime
+    // capability facts, and local-only synthetic policy are owned by the OD
+    // Next prompt service. This composition root only supplies detected runtime
+    // versions and process configuration.
+    const odNextStrategyRecipe = await resolveOdNextPromptRecipeForRun({
+      db,
+      bundledPluginsDir: BUNDLED_PLUGINS_DIR,
+      appliedPluginSnapshotId,
+      agentId,
+      streamFormat,
+      atomPromptsEnabled: bundledAtomPromptsEnabled,
+      syntheticCanary: odNextSyntheticCanary,
+      automaticAdmission: odNextAutomaticAdmission,
+      runtimeCapabilitySnapshot,
+      getRuntimeVersions: () => ensureDetectedRuntimeVersions(
+        agentId,
+        agentCliEnvForAgent(appConfigForPrompt?.agentCliEnv, agentId),
+      ),
+    });
+
     // Hoisted verbatim out of the composeSystemPrompt() call so the exact same
     // object both composes the prompt and feeds section-level drift
     // attribution — a second, hand-maintained copy of these inputs would drift
     // from the real ones and mislabel the telemetry it exists to explain.
-    const systemPromptInputs = {
+    const defaultSystemPromptInputs = {
       agentId,
       skillBody,
       skillName,
@@ -9536,7 +10370,167 @@ export async function startServer({
       // do NOT carry this flip into a PR against main.
       promptCoreVariant: process.env.OD_PROMPT_CORE === 'classic' ? undefined : 'slim',
     };
-    const prompt = composeSystemPrompt(systemPromptInputs);
+    // The example card the project was seeded from contributes reference
+    // material, never authority: its SKILL.md rides in
+    // `session_skills/user_selected_skills`, and its identity plus its
+    // manifest build brief ride here as a `kind="fact"` block. Re-resolved
+    // through the same exact local lookup that bound it, so an example that
+    // was removed or replaced simply goes unnamed instead of letting another
+    // same-id record speak for it.
+    let odNextExampleReference;
+    if (odNextStrategyRecipe) {
+      const odNextExampleBinding = readVerifiedProjectExampleBinding(metadata);
+      if (odNextExampleBinding) {
+        try {
+          odNextExampleReference = odNextExampleReferenceFact({
+            binding: odNextExampleBinding,
+            record: await getLocalPluginBySource(
+              db,
+              odNextExampleBinding.pluginId,
+              odNextExampleBinding.pluginSource,
+            ),
+            locale: typeof locale === 'string' ? locale : undefined,
+          });
+        } catch (err) {
+          console.warn(
+            `[od-next-example] example reference fact unavailable: ${err?.message ?? err}`,
+          );
+        }
+      }
+    }
+    // Handheld shell for phone-app prototypes: resolved from project metadata
+    // and the user's own words (never the model's guess), then the selected
+    // shell is quoted as a fact so the Build holds real handset markup.
+    const odNextDeviceFrame = odNextStrategyRecipe?.taskType === 'prototype'
+      ? selectOdNextDeviceFrameContextV2({
+          resolution: resolveOdNextDevicePlatform({
+            metadata,
+            textPlatform: devicePlatformSignal,
+          }),
+          taskResources: odNextStrategyRecipe.taskResources,
+        })
+      : null;
+    // Structure-only layout primitives travel with every prototype run as a
+    // fact, so stacked text, truncation, rails, and screen chrome are composed
+    // from classes that already behave instead of re-derived per component.
+    const odNextLayoutPrimitivesCss = odNextStrategyRecipe?.taskType === 'prototype'
+      ? selectOdNextLayoutPrimitivesCss(odNextStrategyRecipe.taskResources)
+      : null;
+    const odNextDeckIntent = odNextStrategyRecipe?.taskType !== 'ppt'
+      && freeformDeckSignal === true;
+    const isOdNextDeckRequest = odNextStrategyRecipe?.taskType === 'ppt'
+      || odNextDeckIntent;
+    const hasSelectedDeckSeed = odNextStrategyRecipe?.taskType === 'ppt' && Boolean(
+      template?.files?.some((file) => /\.html?$/i.test(file.name))
+      || /(?:^|\/)assets\/template\.html\b/i.test(skillBody ?? '')
+      || frozenSkillPackage?.selections?.some((selection) =>
+        /(?:^|\/)assets\/template\.html\b/i.test(selection.body)
+        || selection.files.some((file) => /(?:^|\/)assets\/template\.html$/i.test(file.path)),
+      ),
+    );
+    let hasExistingDeckArtifact = false;
+    if (
+      odNextStrategyRecipe?.taskType === 'ppt'
+      && typeof projectId === 'string'
+      && projectId
+    ) {
+      try {
+        const files = await listFiles(PROJECTS_DIR, projectId, { metadata });
+        hasExistingDeckArtifact = files.some((file) => /\.html?$/i.test(file.name));
+      } catch {
+        // Inventory failure must not authorize replacing a potentially legacy
+        // deck. The later project setup reports the underlying filesystem issue.
+        hasExistingDeckArtifact = true;
+      }
+    }
+    const odNextDeckFrameworkMode = isOdNextDeckRequest && odNextStrategyRecipe
+      ? resolveOdNextDeckFrameworkMode({
+          taskType: odNextStrategyRecipe.taskType,
+          deckIntent: odNextDeckIntent,
+          hasSelectedDeckSeed,
+          hasExistingDeckArtifact,
+        })
+      : undefined;
+    const odNextStableRequestContext = odNextStrategyRecipe
+      ? {
+          agentId,
+          streamFormat,
+          // The runtime's real plan-tool name. OD Next composes its own prompt
+          // and never reaches the slim charter that carries this note, so
+          // without it here an OD Next codex run is told to keep a Todo plan
+          // live and is never told what its plan tool is called. Resolved from
+          // the single daemon-side table; a runtime with no verified name
+          // resolves to null and adds no bytes.
+          planToolNote: planToolNoteForRuntime(agentId, streamFormat),
+          executionProfile: executionProfileFromStreamFormat(streamFormat),
+          deckIntent: odNextDeckIntent,
+          deckFrameworkMode: odNextDeckFrameworkMode,
+          metadata,
+          template,
+          exampleReference: odNextExampleReference,
+          ...(odNextDeviceFrame ? { deviceFrame: odNextDeviceFrame } : {}),
+          ...(odNextLayoutPrimitivesCss ? { layoutPrimitivesCss: odNextLayoutPrimitivesCss } : {}),
+          designSystemBody,
+          designSystemTitle,
+          designSystemUsageMd,
+          designSystemTokensCss,
+          designSystemComponentsManifest,
+          designSystemFixtureHtml,
+          designSystemPullIndex,
+          designSystemImportMode,
+          craftBody,
+          craftSections,
+          memoryBody,
+          locale: typeof locale === 'string' ? locale : undefined,
+          sessionMode: normalizeConversationSessionMode(sessionMode),
+          userInstructions,
+          projectInstructions,
+        }
+      : null;
+    const systemPromptInputs = odNextStrategyRecipe
+      ? {
+          odNextStrategyRecipe,
+          ...odNextStableRequestContext,
+        }
+      : defaultSystemPromptInputs;
+    if (odNextStrategyRecipe) {
+      assertOdNextSemanticRequestFactProducerCoverage('daemon_system_prompt', {
+        strategy_task_skill: odNextStrategyRecipe.taskSkill,
+        strategy_task_type: odNextStrategyRecipe.taskType,
+        strategy_runtime_capability_facts: odNextStrategyRecipe.planningFacts,
+        project_and_design_context: {
+          metadata,
+          template,
+          exampleReference: odNextExampleReference,
+          deviceFrame: odNextDeviceFrame,
+          layoutPrimitivesCss: odNextLayoutPrimitivesCss,
+          deckIntent: odNextDeckIntent,
+          deckFrameworkMode: odNextDeckFrameworkMode,
+          designSystemBody,
+          designSystemTitle,
+          craftBody,
+          craftSections,
+          memoryBody,
+        },
+        user_and_project_instructions: { userInstructions, projectInstructions },
+      });
+    }
+    const prompt = odNextStrategyRecipe
+      ? composeOdNextStrategyCorePromptV2(odNextStrategyRecipe)
+      : composeSystemPrompt(systemPromptInputs);
+    // OD Next sends a canonical XML tree, not this Markdown string. The tree's
+    // cache-stable head, its per-task identity, and the runtime-owned planning
+    // facts are three separate products of the same verified recipe, so they are
+    // composed here together and placed in different bundle slots downstream.
+    const odNextBundleHead = odNextStrategyRecipe
+      ? composeOdNextStrategyBundleHeadV2(odNextStrategyRecipe)
+      : null;
+    const odNextRecipeIdentity = odNextStrategyRecipe
+      ? odNextStrategyRecipeIdentityV2(odNextStrategyRecipe)
+      : null;
+    const odNextRuntimeFacts = odNextStrategyRecipe
+      ? renderOdNextRuntimeFactsV2(odNextStrategyRecipe, odNextStableRequestContext ?? {})
+      : '';
     // The chat handler also needs to know where the active skill lives
     // on disk so it can stage a per-project copy of its side files
     // before spawning the agent. Returning that here avoids a second
@@ -9545,9 +10539,18 @@ export async function startServer({
     // orchestrator gate so prompt and orchestrator stay in lockstep.
     return {
       prompt,
+      odNextBundleHead,
+      odNextRecipeIdentity,
+      odNextRuntimeFacts,
+      odNextStableContextPrompt: odNextStableRequestContext
+        ? composeOdNextStrategyStableRequestContextV2(
+            odNextStableRequestContext,
+            odNextStrategyRecipe?.executionProfile ?? 'filesystem',
+          )
+        : '',
       activeSkillDir,
-      activeSkillDirs,
-      critiqueShouldRun,
+      activeSkillDirs: odNextStrategyRecipe ? [] : activeSkillDirs,
+      critiqueShouldRun: odNextStrategyRecipe ? false : critiqueShouldRun,
       designSystemSelection: {
         id: activeDesignSystemId,
         requestedId: effectiveDesignSystemId,
@@ -9555,9 +10558,25 @@ export async function startServer({
         digest: designSystemDigest,
       },
       promptTelemetryParts: {
-        skillPrompt: skillBody ?? '',
-        designSystemPrompt: designSystemBody ?? '',
-        pluginStagePrompt: [pluginBlock, ...(activeStageBlocks ?? [])]
+        skillPrompt: odNextStrategyRecipe?.taskSkill ?? skillBody ?? '',
+        designSystemPrompt: odNextStrategyRecipe
+          ? [
+              designSystemTitle,
+              designSystemBody,
+              designSystemUsageMd,
+              designSystemTokensCss,
+              designSystemComponentsManifest,
+              designSystemFixtureHtml,
+              designSystemPullIndex,
+              designSystemImportMode,
+            ]
+              .filter((part) => typeof part === 'string' && part.trim().length > 0)
+              .join('\n\n---\n\n')
+          : designSystemBody ?? '',
+        pluginStagePrompt: [
+          ...(odNextStrategyRecipe ? [] : [pluginBlock]),
+          ...(odNextStrategyRecipe?.activeStageBlocks ?? activeStageBlocks ?? []),
+        ]
           .filter((part) => typeof part === 'string' && part.trim().length > 0)
           .join('\n\n---\n\n'),
       },
@@ -9568,6 +10587,16 @@ export async function startServer({
     };
   };
 
+  const prepareOdNextInitialPromptBundle = createOdNextInitialPromptBundleService({
+    db,
+    projectsDir: PROJECTS_DIR,
+    runtimeDataDir: RUNTIME_DATA_DIR,
+    daemonUrl,
+    sandboxEnabled: SANDBOX_RUNTIME.enabled,
+    getAgentDef,
+    createAgentRuntimeToolPrompt,
+    composeDaemonSystemPrompt,
+  });
   // Plan §3.I1 / §3.D / spec §10.1: fire the pipeline schedule on a
   // run's SSE stream. Synchronous first emit (the first
   // pipeline_stage_started event lands before the agent process
@@ -9665,10 +10694,76 @@ export async function startServer({
     run.nativeSessionContinuePending = null;
     /** @type {Partial<ChatRequest> & { imagePaths?: string[] }} */
     chatBody = chatBody || {};
+    let strategyTaskAtStart;
+    try {
+      strategyTaskAtStart = getStrategyTaskExecutionByRunId(db, run.id);
+    } catch (error) {
+      return design.runs.fail(
+        run,
+        error instanceof InvalidFrozenSkillPackageError
+          ? 'OD_NEXT_SKILL_SNAPSHOT_INVALID'
+          : 'OD_NEXT_TASK_STATE_INVALID',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    const taskInputOwner = run.odNextTaskInputSnapshot ?? null;
+    if (taskInputOwner && !strategyTaskAtStart) {
+      return design.runs.fail(
+        run,
+        'OD_NEXT_TASK_STATE_INVALID',
+        'OD Next Run retains an immutable input owner but has no persisted task mapping.',
+      );
+    }
+    const strategyRunMapping = strategyTaskAtStart?.runs.find(
+      (mapping) => mapping.runId === run.id,
+    ) ?? null;
+    if (
+      strategyTaskAtStart
+      && (
+        !strategyRunMapping
+        || strategyTaskAtStart.latestRunId !== run.id
+        || strategyRunMapping.inputStage !== strategyTaskAtStart.inputStage
+        || !taskInputOwner
+        || taskInputOwner.taskExecutionId !== strategyTaskAtStart.taskExecutionId
+        || taskInputOwner.manifestSha256
+          !== strategyTaskAtStart.frozenInputIdentity.taskInputManifestSha256
+        || strategyTaskAtStart.frozenInputIdentity.snapshotId
+          !== strategyTaskAtStart.snapshotId
+        || run.projectId !== strategyTaskAtStart.projectId
+        || run.conversationId !== strategyTaskAtStart.conversationId
+        || run.agentId !== strategyTaskAtStart.selectedAgentId
+        || run.appliedPluginSnapshotId !== strategyTaskAtStart.snapshotId
+        || chatBody.projectId !== strategyTaskAtStart.projectId
+        || chatBody.conversationId !== strategyTaskAtStart.conversationId
+        || chatBody.agentId !== strategyTaskAtStart.selectedAgentId
+        || chatBody.appliedPluginSnapshotId !== strategyTaskAtStart.snapshotId
+      )
+    ) {
+      return design.runs.fail(
+        run,
+        'OD_NEXT_TASK_STATE_INVALID',
+        'OD Next Run, request, immutable input owner, and persisted task mapping are not one exact scope.',
+      );
+    }
+    const persistedStrategyFinalText = strategyRunMapping?.finalText.text ?? null;
+    const isOdNextRequestStage = strategyRunMapping?.inputStage === 'request';
+    const hasExplicitCurrentPrompt = Object.prototype.hasOwnProperty.call(
+      chatBody,
+      'currentPrompt',
+    );
+    const strategyProtocol = strategyTaskAtStart
+      ? new OdNextMachineProtocolStream()
+      : null;
+    let strategyVisibleEmitted = '';
+    let strategyProtocolResult = null;
+    let strategyToolUseCount = 0;
+    let pendingStrategyContinuation = null;
     const {
       agentId,
       message,
       currentPrompt,
+      priorTranscript,
+      resumeContinuation,
       systemPrompt,
       imagePaths = [],
       projectId,
@@ -9700,9 +10795,28 @@ export async function startServer({
     if (typeof clientRequestId === 'string' && clientRequestId)
       run.clientRequestId = clientRequestId;
     if (typeof agentId === 'string' && agentId) run.agentId = agentId;
+    let odNextTaskInputSnapshot = null;
+    const cleanupOdNextRunInputProjection = () => {
+      if (!odNextTaskInputSnapshot) return;
+      try {
+        removeOdNextRunInputProjection(odNextTaskInputSnapshot);
+      } catch (error) {
+        console.warn(
+          '[od-next] run input projection cleanup failed',
+          error instanceof Error ? error.message : String(error),
+        );
+      } finally {
+        odNextTaskInputSnapshot = null;
+      }
+    };
     const finishRun = (status, code = null, signal = null) => {
+      cleanupOdNextRunInputProjection();
       finalizeRunMessageEvents(db, run);
       return design.runs.finish(run, status, code, signal);
+    };
+    const failRun = (code, message) => {
+      cleanupOdNextRunInputProjection();
+      return design.runs.fail(run, code, message);
     };
     // Freeze the billing address once, before the first asynchronous setup
     // step. HTTP-created runs already carry the scope captured by the request
@@ -9740,15 +10854,17 @@ export async function startServer({
       sessionMode === 'chat' || sessionMode === 'design' || sessionMode === 'plan'
         ? normalizeConversationSessionMode(sessionMode)
         : normalizeConversationSessionMode(conversationSession?.sessionMode);
-    const def = getAgentDef(agentId);
+    // Single choke point for the codex transport switch. Every other
+    // agent — and codex with the switch off — gets back the identical
+    // registry object, so nothing below can tell this call happened.
+    const def = applyCodexTransportOverride(getAgentDef(agentId));
     if (!def)
-      return design.runs.fail(
-        run,
+      return failRun(
         'AGENT_UNAVAILABLE',
         `unknown agent: ${agentId}`,
       );
     if (!def.bin)
-      return design.runs.fail(run, 'AGENT_UNAVAILABLE', 'agent has no binary');
+      return failRun('AGENT_UNAVAILABLE', 'agent has no binary');
     const byokOpenCodeProvider = def.id === 'byok-opencode'
       ? buildOpenCodeByokProviderConfig(
           byokProvider,
@@ -9756,8 +10872,7 @@ export async function startServer({
         )
       : null;
     if (def.id === 'byok-opencode' && !byokOpenCodeProvider) {
-      return design.runs.fail(
-        run,
+      return failRun(
         'BYOK_PROVIDER_REQUIRED',
         BYOK_OPENCODE_PROVIDER_REQUIRED_MESSAGE,
       );
@@ -9786,7 +10901,7 @@ export async function startServer({
       assertValidRuntimeDefFirstOutputTimeoutMs(def.firstOutputTimeoutMs);
     } catch (err) {
       if (err instanceof RangeError) {
-        return design.runs.fail(run, 'AGENT_RUNTIME_DEF_INVALID', err.message);
+        return failRun('AGENT_RUNTIME_DEF_INVALID', err.message);
       }
       throw err;
     }
@@ -9796,7 +10911,7 @@ export async function startServer({
       (typeof message !== 'string' || !message.trim()) &&
       safeCommentAttachments.length === 0
     ) {
-      return design.runs.fail(run, 'BAD_REQUEST', 'message required');
+      return failRun('BAD_REQUEST', 'message required');
     }
     const browserUseRunState = buildBrowserUseRunState({
       requested: isBrowserUseRequested(message, currentPrompt, systemPrompt),
@@ -9841,22 +10956,37 @@ export async function startServer({
     let existingProjectFiles = [];
     let existingProjectFolders = [];
     if (typeof projectId === 'string' && projectId) {
+      let chatMeta = null;
       try {
         const chatProject = getProject(db, projectId);
-        const chatMeta = chatProject?.metadata;
+        chatMeta = chatProject?.metadata ?? null;
         // ensureProject/resolveProjectDir now resolve external baseDir folders
         // internally (and assertSandboxProjectRootAvailable rejects imported
         // folders with no managed copy in sandbox mode), so we pass chatMeta
         // through instead of branching on baseDir here.
         assertSandboxProjectRootAvailable(chatMeta);
         cwd = await ensureProject(PROJECTS_DIR, projectId, chatMeta);
-        existingProjectFiles = await listFiles(PROJECTS_DIR, projectId, { metadata: chatMeta });
-        existingProjectFolders = await listProjectFolders(PROJECTS_DIR, projectId, { metadata: chatMeta });
       } catch (err) {
         if (err instanceof SandboxImportedProjectError) {
-          return design.runs.fail(run, 'BAD_REQUEST', err.message);
+          return failRun('BAD_REQUEST', err.message);
         }
         cwd = null;
+      }
+      if (cwd) {
+        try {
+          existingProjectFiles = await listFiles(PROJECTS_DIR, projectId, { metadata: chatMeta });
+        } catch {
+          // Inventory is advisory prompt context. A concurrent project-tree
+          // mutation must not erase the authoritative cwd/session identity.
+          existingProjectFiles = [];
+        }
+        try {
+          existingProjectFolders = await listProjectFolders(PROJECTS_DIR, projectId, { metadata: chatMeta });
+        } catch {
+          // Keep cwd stable even when a directory disappears mid-enumeration.
+          existingProjectFolders = [];
+        }
+      } else {
         existingProjectFiles = [];
         existingProjectFolders = [];
       }
@@ -9865,36 +10995,69 @@ export async function startServer({
 
     // Sanitise supplied image paths: must live under UPLOAD_DIR and stay
     // below the prompt-image safety cap.
+    if (run.odNextTaskInputSnapshot) {
+      if (
+        strategyTaskAtStart
+        && run.odNextTaskInputSnapshot.manifestSha256
+          !== strategyTaskAtStart.frozenInputIdentity.taskInputManifestSha256
+      ) {
+        return failRun(
+          'OD_NEXT_INPUT_SNAPSHOT_TAMPERED',
+          'OD Next Run input descriptor no longer matches the persisted task identity.',
+        );
+      }
+      try {
+        odNextTaskInputSnapshot = createOdNextRunInputProjection({
+          descriptor: run.odNextTaskInputSnapshot,
+          snapshotsRoot: path.join(RUNTIME_DATA_DIR, 'od-next-task-inputs'),
+          projectionsRoot: path.join(RUNTIME_DATA_DIR, 'od-next-run-inputs'),
+          runId: run.id,
+        });
+      } catch (error) {
+        return failRun(
+          error instanceof OdNextTaskInputSnapshotError
+            ? error.code
+            : 'OD_NEXT_INPUT_SNAPSHOT_INVALID',
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    } else if (isOdNextRequestStage) {
+      return failRun(
+        'OD_NEXT_INPUT_SNAPSHOT_INVALID',
+        'OD Next request Run is missing its immutable task input snapshot.',
+      );
+    }
     const { safeImages, oversizedImages, failedImages } =
-      resolveSafePromptImagePaths(imagePaths);
+      resolveSafePromptImagePaths(odNextTaskInputSnapshot ? [] : imagePaths);
     if (oversizedImages.length > 0) {
-      return design.runs.fail(
-        run,
+      return failRun(
         'BAD_REQUEST',
         'Image attachments must be 1 MB or smaller.',
       );
     }
     if (failedImages.length > 0) {
-      return design.runs.fail(
-        run,
+      return failRun(
         'INTERNAL_ERROR',
         'Failed to read one or more image attachments.',
       );
     }
+    const transportSourceImages = odNextTaskInputSnapshot?.imagePaths ?? safeImages;
     const amrStagedImages =
-      def.id === 'amr'
+      def.id === 'amr' && !odNextTaskInputSnapshot
         ? await stageAmrImagePaths(cwd ?? PROJECT_ROOT, safeImages, UPLOAD_DIR)
-        : safeImages;
+        : transportSourceImages;
 
     // Project-scoped attachments: project-relative paths inside cwd. Each
     // is run through the same path-traversal guard the file CRUD endpoints
     // use, then existence-checked. Whatever survives shows up as an
     // explicit list at the bottom of the user message so the agent knows
     // to Read it.
-    const safeAttachments = cwd
+    const safeAttachments = !odNextTaskInputSnapshot && cwd
       ? resolveSafeProjectAttachments(cwd, attachments)
       : [];
-    run.projectAttachmentPaths = safeAttachments;
+    run.projectAttachmentPaths = odNextTaskInputSnapshot
+      ? odNextTaskInputSnapshot.attachmentReferences
+      : safeAttachments;
 
     // Local code agents don't accept a separate "system" channel the way the
     // Messages API does — we fold the skill + design-system prompt into the
@@ -10077,21 +11240,33 @@ export async function startServer({
       deck: detectDeckIntentSignal(...intentSignalTexts),
       media: detectMediaIntentSignal(...intentSignalTexts),
       platform: detectPlatformIntentSignal(...intentSignalTexts),
+      devicePlatform: detectOdNextDevicePlatformFromText(...intentSignalTexts),
     };
     const intentSignals =
       !legacyIntentSignalScan && typeof run.conversationId === 'string' && run.conversationId
         ? latchConversationIntentSignals(db, run.conversationId, freshIntentSignals)
         : freshIntentSignals;
 
-    const {
-      prompt: daemonSystemPrompt,
-      activeSkillDirs,
-      critiqueShouldRun,
-      designSystemSelection,
-      promptTelemetryParts,
-      stableSectionInputs,
-    } =
-      await composeDaemonSystemPrompt({
+    const promptContext = strategyTaskAtStart
+      ? {
+          prompt: '',
+          activeSkillDirs: [],
+          critiqueShouldRun: false,
+          designSystemSelection: {
+            id: typeof designSystemId === 'string' ? designSystemId : null,
+            requestedId: typeof designSystemId === 'string' ? designSystemId : null,
+            source: 'none',
+            digest: null,
+          },
+          promptTelemetryParts: {
+            skillPrompt: '',
+            designSystemPrompt: '',
+            pluginStagePrompt: '',
+          },
+          stableSectionInputs: {},
+          odNextStableContextPrompt: '',
+        }
+      : await composeDaemonSystemPrompt({
         agentId,
         projectId,
         skillId,
@@ -10113,7 +11288,17 @@ export async function startServer({
         freeformDeckSignal: intentSignals.deck,
         mediaHintSignal: intentSignals.media,
         platformHintSignal: intentSignals.platform,
+        frozenSkillPackage: undefined,
       });
+    const {
+      prompt: daemonSystemPrompt,
+      activeSkillDirs,
+      critiqueShouldRun,
+      designSystemSelection,
+      promptTelemetryParts,
+      stableSectionInputs,
+      odNextStableContextPrompt,
+    } = promptContext;
 
     run.designSystemId = designSystemSelection?.id ?? null;
     run.designSystemRequestedId = designSystemSelection?.requestedId ?? null;
@@ -10147,7 +11332,39 @@ export async function startServer({
     // daemon and folded into the system prompt directly (see
     // `readDesignSystem`), so an agent never has to open them via the
     // filesystem.
-    if (cwd && activeSkillDirs.length > 0) {
+    if (cwd && strategyTaskAtStart?.frozenSkillPackage) {
+      await materializeFrozenSkillPackage({
+        frozen: strategyTaskAtStart.frozenSkillPackage,
+        cwd,
+      });
+    }
+    // OD Next task-profile resources (the handheld shells for prototype
+    // tasks) are staged beside the frozen Skills on every strategy run, so the
+    // rule card's `.od-frames/<shell>.html` paths resolve even when no platform
+    // was resolved up front. Fail-soft: a staging error costs the shells, not
+    // the run.
+    if (cwd && strategyTaskAtStart && typeof run.appliedPluginSnapshotId === 'string') {
+      try {
+        const staging = await materializeOdNextDeviceFrames({
+          cwd,
+          resources: await loadOdNextTaskResourcesForSnapshot({
+            bundledPluginsDir: BUNDLED_PLUGINS_DIR,
+            snapshot: getSnapshot(db, run.appliedPluginSnapshotId),
+          }),
+        });
+        if (staging.staged.length > 0) run.odNextStagedDeviceFrames = staging.staged;
+        if (staging.skipped.length > 0) {
+          console.warn(
+            `[od-next-device-frames] left pre-existing project files in place: ${staging.skipped.join(', ')}`,
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[od-next-device-frames] staging skipped: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (cwd && !strategyTaskAtStart?.frozenSkillPackage && activeSkillDirs.length > 0) {
       for (const skillDir of activeSkillDirs) {
         const result = await stageActiveSkill(
           cwd,
@@ -10275,6 +11492,109 @@ export async function startServer({
       const afterSnapshot = await snapshotProjectArtifactsAsync(artifactBaseline.cwd);
       return resolveRunArtifactOutcomeBeforeFinish(afterSnapshot);
     };
+    // Design §10.3. The properties object is the builder's return value
+    // VERBATIM — nothing is spread in or added here, so what the builder's own
+    // tests assert on is exactly what reaches the sink.
+    const emitChatArtifactCaptureTelemetry = (
+      captureRun: { id: string; projectId?: string; analyticsContext?: AnalyticsContext | null },
+      report: CaptureRunChatArtifactsReport,
+    ) => {
+      try {
+        const context = captureRun.analyticsContext ?? null;
+        if (!context || !captureRun.projectId || !design?.analytics?.capture) return;
+        const properties = chatArtifactCaptureResultProps({
+          projectId: captureRun.projectId,
+          runId: captureRun.id,
+          report,
+        });
+        if (!properties) return;
+        design.analytics.capture({
+          eventName: 'chat_artifact_capture_result',
+          context,
+          appVersion: design.getAppVersion?.() ?? 'unknown',
+          properties,
+          insertId: `chat_artifact_capture_result:${captureRun.id}`,
+        });
+      } catch {
+        // Telemetry never changes the turn's outcome.
+      }
+    };
+    // Freeze this turn's artifact evidence while the daemon still owns the
+    // moment: at the terminal chokepoint, BEFORE the terminal SSE frame goes
+    // out and before any client can see the message as done. A snapshot taken
+    // after that races the next turn's overwrite, which is exactly the bug this
+    // exists to close. Never throws — a failed capture degrades one card, it
+    // does not fail the run.
+    const captureChatArtifactsBeforeSuccess = async () => {
+      try {
+        if (!run?.projectId || !run.assistantMessageId) return;
+        const outcome = await resolveRunArtifactOutcomeBeforeFinishAsync();
+        const touchedPaths = Array.isArray(outcome?.diff?.touchedPaths)
+          ? outcome.diff.touchedPaths
+          : [];
+        if (!outcome?.projectRoot || touchedPaths.length === 0) return;
+        // Attach the turn's deliverable to the turn, before anything else here
+        // can fail. `produced_files_json` otherwise has exactly one writer — a
+        // closure inside the browser's `ProjectView` — so a run whose viewer
+        // navigated away finishes with its artifacts orphaned, and the client's
+        // own repair window has closed by the time the user returns
+        // (OPEND-2598 / OPEND-2608). This only fills a column that is still
+        // NULL, so the client's list stays authoritative when it does arrive.
+        // Its own try: a produced-file miss must not cost the snapshot capture
+        // below, and vice versa.
+        try {
+          await associateRunProducedFiles(db, {
+            messageId: run.assistantMessageId,
+            projectRoot: outcome.projectRoot,
+            touchedPaths,
+          });
+        } catch (err) {
+          console.warn('[chat-artifacts] produced-file association failed', err);
+        }
+        const deps = { db, blobs: CHAT_ARTIFACT_BLOBS, quota: CHAT_ARTIFACT_QUOTA };
+        const captured = await captureRunChatArtifactSnapshots(deps, {
+          projectId: run.projectId,
+          projectRoot: outcome.projectRoot,
+          messageId: run.assistantMessageId,
+          runId: run.id,
+          touchedPaths,
+        });
+        emitChatArtifactCaptureTelemetry(run, captured);
+        // Same chokepoint, same reason (spec §6.3). The image path above froze
+        // BYTES here; this freezes the HTML card's RENDERER INPUT here, so the
+        // cover render that follows can take its seconds without the file it is
+        // drawing being allowed to change underneath it. Only the freeze is
+        // awaited — the render deliberately outlives the turn.
+        await freezeAndRenderChatArtifactCovers(deps, {
+          projectRoot: outcome.projectRoot,
+          rows: captured.rows,
+          renderer: desktopArtifactExporter,
+          /*
+           * The cover outlives the turn by design, so it lands into a message
+           * the client already filed as done — after the single post-run
+           * re-read (`ProjectView.scheduleConversationMessageRefresh`, 150ms)
+           * has been and gone. Without this nudge the card keeps the
+           * live-iframe degrade branch until a full reload, which is the
+           * regression spec line 505 exists to forbid.
+           *
+           * Thin on purpose: it names the stale message and nothing else, so
+           * `listMessages` stays the only thing that decides what a ref is.
+           */
+          onRefsChanged: (row) => {
+            if (!run.projectId || !run.conversationId) return;
+            emitProjectEvent(run.projectId, {
+              type: 'chat-artifact-refs-changed',
+              projectId: run.projectId,
+              conversationId: run.conversationId,
+              messageId: row.messageId,
+              at: Date.now(),
+            });
+          },
+        });
+      } catch (err) {
+        console.warn('[chat-artifacts] run terminal capture failed', err);
+      }
+    };
     const snapshotAiHtmlVersionsBeforeSuccess = async () => {
       const origin = artifactOriginForRun({
         runId: run.id,
@@ -10299,6 +11619,20 @@ export async function startServer({
         ...(origin ? { origin } : {}),
         metadata: projectRecord?.metadata,
       });
+      // §3.2 lineage, backfilled rather than reordered: the chat-artifact refs
+      // were written a few lines above, before these versions existed. Never
+      // allowed to fail the run — a card without lineage is still a card.
+      if (run.assistantMessageId && result.snapshots.length > 0) {
+        try {
+          setMessageArtifactHtmlVersionIds(
+            db,
+            run.assistantMessageId,
+            new Map(result.snapshots.map(({ fileName, version }) => [fileName, version.id])),
+          );
+        } catch (err) {
+          console.warn('[chat-artifacts] html version lineage backfill failed', err);
+        }
+      }
       if (origin) {
         const matching = result.snapshots.filter(({ version }) =>
           version.origin?.entrySurface === origin.entrySurface
@@ -10332,15 +11666,26 @@ export async function startServer({
         resolveRunArtifactOutcomeBeforeFinish();
       }
     };
-    const extraAllowedDirs = resolveChatExtraAllowedDirs({
-      agentId,
-      skillsDir: SKILLS_DIR,
-      designSystemsDir: DESIGN_SYSTEMS_DIR,
-      linkedDirs,
-    });
+    const extraAllowedDirs = [
+      ...resolveChatExtraAllowedDirs({
+        agentId,
+        skillsDir: SKILLS_DIR,
+        designSystemsDir: DESIGN_SYSTEMS_DIR,
+        linkedDirs,
+      }),
+      ...(odNextTaskInputSnapshot
+        ? [odNextTaskInputSnapshot.projectionAccessRoot]
+        : []),
+    ];
     const researchCommandContract = resolveResearchCommandContract(
       research,
-      message,
+      isOdNextRequestStage
+        ? resolveOdNextRequestUserPrompt({
+            message,
+            currentPrompt,
+            hasCurrentPrompt: hasExplicitCurrentPrompt,
+          })
+        : message,
     );
     // Resume-capable adapters continue their own upstream session so they
     // keep working memory across turns. Decide once per run; reuse for the
@@ -10466,7 +11811,7 @@ export async function startServer({
             currentCwd: effectiveCwd,
             currentAssistantMessageId: run.assistantMessageId ?? null,
           })
-        : { storedSessionId: null as string | null, resumeSessionId: null as string | null, newSessionId: undefined as string | undefined, isResuming: false, storedStablePromptHash: null as string | null, storedStableSections: null as StableSectionHashes | null, invalidationReason: null };
+        : { storedSessionId: null as string | null, resumeSessionId: null as string | null, newSessionId: undefined as string | undefined, isResuming: false, storedStablePromptHash: null as string | null, storedInputTokens: null as number | null, storedStableSections: null as StableSectionHashes | null, invalidationReason: null };
     // A same-run post-tool recovery resumes the exact session id captured from
     // the interrupted attempt. The ordinary cross-turn cursor guard cannot
     // admit it yet because the current assistant placeholder is still in
@@ -10486,9 +11831,22 @@ export async function startServer({
             pendingNativeSessionContinue.stablePromptHash ?? null,
           storedStableSections:
             pendingNativeSessionContinue.stablePromptSections ?? null,
+          storedInputTokens:
+            pendingNativeSessionContinue.lastInputTokens ?? null,
           invalidationReason: null,
         }
       : resolvedAgentResumeCtx;
+    if (
+      strategyTaskAtStart
+      && strategyTaskAtStart.inputStage !== 'request'
+      && !agentResumeCtx.isResuming
+    ) {
+      const blocked = blockAutomaticContinuation(db, { runId: run.id });
+      if (blocked) run.strategyTask = projectStrategyTask(blocked, run.id);
+      throw new Error(
+        'OD Next continuation requires the locked native session; cold re-seeding is forbidden.',
+      );
+    }
     const publishNativeSessionRecoveryMetadata = () => {
       if (!run.nativeSessionRecovery) return;
       design.runs.emit(run, 'diagnostic', {
@@ -10496,6 +11854,13 @@ export async function startServer({
         nativeSessionRecovery: run.nativeSessionRecovery,
       });
     };
+    // Physical attempts share run.events, so scanning that logical-run tail can
+    // assign attempt A's usage to attempt B's different session. Keep only this
+    // attempt's usage frames here; a fresh startChatRun closure starts empty.
+    const physicalSessionUsage = createPhysicalAgentSessionUsageTracker(
+      pendingNativeSessionContinue?.lastInputTokens ?? null,
+    );
+    const observedInputTokensForSession = physicalSessionUsage.inputTokens;
     run.nativeSessionRecovery = initialNativeSessionRecoveryMetadata({
       agent: def,
       supportsSessionResume: agentSupportsSessionResume,
@@ -10505,15 +11870,77 @@ export async function startServer({
       invalidationReason: agentResumeCtx.invalidationReason,
     });
     publishNativeSessionRecoveryMetadata();
-    const userRequestPrompt = composeChatUserRequestForAgent(
-      message,
-      currentPrompt,
-      // Only trim to the latest turn when we are actually resuming an
-      // existing session. A create turn still sends the full transcript so
-      // a brand-new session (incl. first turn after another agent)
-      // is seeded with prior context.
-      { skipTranscript: agentResumeCtx.isResuming },
-    );
+    /*
+     * The plan the previous turn last declared — whole, finished rows included.
+     *
+     * Read here, on the path that already queries this conversation for the
+     * resume cursor, and handed to the agent as a fact it decides about — see
+     * `renderUnfinishedTodoRecall`, which decides whether any of it is still
+     * open and renders nothing when none of it is. Every runtime gets it, not
+     * just the 6 with native resume: the 21 that start a fresh process each
+     * turn are exactly the ones with no other way to know. A read failure
+     * degrades to "nothing outstanding" rather than failing the run.
+     *
+     * NOTE(sync/main): the OD Next request stage composes its own user prompt
+     * from the frozen task bundle, so recall is not threaded into that branch —
+     * the bundle IS the turn's stated input. Recall still applies to every
+     * ordinary chat turn, which is where it was measured.
+     */
+    const previousTurnTaskList: RecalledTodo[] = run.conversationId
+      ? (() => {
+          try {
+            return recalledTodosFromTodoWriteInput(
+              latestTodoWriteInputForConversation(
+                db,
+                run.conversationId,
+                run.assistantMessageId ?? '',
+              ),
+            );
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+    const agentResumePromptPolicy = resolveAgentResumePromptPolicy(agentResumeCtx);
+    // A continuation directive whose stored session the daemon just refused has
+    // to be told which request it is continuing; see
+    // `resolveResumeContinuationSeed`. Callers that ship their own transcript
+    // never set `resumeContinuation`, so this stays null for them.
+    const resumeContinuationSeed = resolveResumeContinuationSeed({
+      isContinuation: resumeContinuation === true,
+      requiresFullTranscript: agentResumePromptPolicy.requiresFullTranscript,
+      storedSessionId: agentResumeCtx.storedSessionId,
+      storedLastMessageId: agentResumeCtx.storedLastMessageId,
+    });
+    const resumeContinuationOriginalRequest =
+      resumeContinuationSeed.required
+      && run.conversationId
+      && resumeContinuationSeed.anchorAssistantMessageId
+        ? userRequestBeforeAssistantMessage(
+            db,
+            run.conversationId,
+            resumeContinuationSeed.anchorAssistantMessageId,
+          )
+        : null;
+    const userRequestPrompt = isOdNextRequestStage
+      ? resolveOdNextRequestUserPrompt({
+          message,
+          currentPrompt,
+          hasCurrentPrompt: hasExplicitCurrentPrompt,
+        })
+      : composeChatUserRequestForAgent(
+          message,
+          currentPrompt,
+          // Only trim to the latest turn when we are actually resuming an
+          // existing session. A create turn still sends the full transcript so
+          // a brand-new session (incl. first turn after another agent)
+          // is seeded with prior context.
+          {
+            skipTranscript: agentResumePromptPolicy.skipTranscript,
+            previousTurnTaskList,
+            resumeContinuationOriginalRequest,
+          },
+        );
     // The stable instruction slice (daemon prompt + tool contract + system
     // prompt = design system / skills / memory) is identical across turns of
     // a conversation in the common case. A resumed Claude session already
@@ -10522,7 +11949,9 @@ export async function startServer({
     // turns and changed-hash turns send the full block (byte-identical to the
     // previous behavior); non-resume agents have isResuming === false and so
     // always send the full block.
-    const stableInstructionFingerprint = [daemonSystemPrompt, runtimeToolPrompt, systemPrompt]
+    const stableInstructionFingerprint = (strategyTaskAtStart
+      ? [daemonSystemPrompt, odNextStableContextPrompt, runtimeToolPrompt, systemPrompt]
+      : [daemonSystemPrompt, runtimeToolPrompt, systemPrompt])
       .map((part) => (typeof part === 'string' ? part.trim() : ''))
       .join('\n\n---\n\n');
     const currentStableHash = hashStableInstructions(stableInstructionFingerprint);
@@ -10538,12 +11967,12 @@ export async function startServer({
     // tool-token grant's presence flips between turns (rare cwd/projectId edge
     // cases); any such change correctly forces a full re-send that turn.
     const includeStableInstructions = computeIncludeStable(
-      agentResumeCtx.isResuming,
+      agentResumePromptPolicy.skipTranscript,
       agentResumeCtx.storedStablePromptHash,
       currentStableHash,
     );
     run.promptCache = describeStablePromptCache({
-      isResuming: agentResumeCtx.isResuming,
+      isResuming: agentResumePromptPolicy.skipTranscript,
       storedStablePromptHash: agentResumeCtx.storedStablePromptHash,
       currentStableHash,
       storedStableSections: agentResumeCtx.storedStableSections,
@@ -10565,6 +11994,55 @@ export async function startServer({
           'Do not mention this title task to the user. Continue with the normal answer after the title marker.',
         ].join('\n')
       : '';
+    /*
+     * This turn's done-marker contract.
+     *
+     * It lives in the per-turn slice for the same reason the connected-MCP
+     * directive does (see the note just below): the key is a fresh nonce every
+     * run, so putting it in `daemonSystemPrompt` would move the cached stable
+     * prefix on EVERY turn of EVERY conversation — a guaranteed
+     * `stable-prompt-changed` miss that also invalidates the upstream cache for
+     * the whole conversation history downstream of it. The rules are cheap to
+     * restate per turn; the prefix is not cheap to lose.
+     *
+     * Wording mirrors the `<od-title>` task above it — same shape of contract
+     * (emit one inline marker the host parses and strips), same "don't narrate
+     * this to the user" clause.
+     */
+    const hostProtocol = renderChatTurnHostProtocolInstructions(
+      typeof run.doneKey === 'string' ? run.doneKey : '',
+      'ordinary',
+    );
+    /*
+     * This turn's follow-up suggestions.
+     *
+     * Shares the per-turn nonce with the done marker above — see
+     * `packages/contracts/src/api/next-step-marker.ts` for why this marker is
+     * keyed at all (clicking a suggestion sends that exact sentence as the
+     * user's next message, so an unkeyed marker would let any text the agent
+     * read plant a sentence in the user's own composer path). Reusing the
+     * existing nonce keeps the cost at one prompt sentence: no second key to
+     * mint, no second event on the wire, and the model has already copied this
+     * exact string once in the same turn.
+     *
+     * Per-turn slice for the same cache reason as the done marker: a fresh
+     * nonce in the stable prefix would miss the prompt cache on every turn.
+     */
+    /*
+     * This turn's display intent.
+     *
+     * Same per-turn slice and same shared nonce as the two markers above — see
+     * `packages/contracts/src/api/artifact-focus-marker.ts` for why this one is
+     * keyed (it names a path the host then reads and renders, so an unkeyed
+     * form would let any document the agent merely READ steer the preview).
+     *
+     * The body lives next to the parser rather than here, so the instruction,
+     * the example it shows, and the regexes that accept it cannot drift apart —
+     * and so a BYOK path composing its own per-turn slice reads the same string
+     * instead of a second copy of it. `renderArtifactFocusInstruction` returns
+     * '' without a key, which is the same guard the two markers above spell out
+     * inline.
+     */
     // The connected-external-MCP directive reflects live OAuth token state,
     // which flips mid-conversation as Bearers expire/refresh. Keeping it out of
     // the cached stable prefix (daemonSystemPrompt) and re-sending it here in
@@ -10572,19 +12050,19 @@ export async function startServer({
     // across resumes (protecting the conversation-history cache) while still
     // giving the model the current MCP auth state on every turn.
     const mcpConnectedDirective = renderConnectedExternalMcpDirective(connectedExternalMcp);
-    const clientInstructionParts = includeStableInstructions
-      ? [researchCommandContract, runContextPrompt, mcpConnectedDirective, browserUsePromptGuard, titleGenerationPrompt, systemPrompt]
-      : [researchCommandContract, runContextPrompt, mcpConnectedDirective, browserUsePromptGuard, titleGenerationPrompt];
-    const clientInstructionPrompt = clientInstructionParts
-      .map((part) => (typeof part === 'string' ? part.trim() : ''))
-      .filter(Boolean)
-      .join('\n\n---\n\n');
-    const instructionPrompt = composeLiveInstructionPrompt({
-      daemonSystemPrompt: includeStableInstructions ? daemonSystemPrompt : '',
-      runtimeToolPrompt: includeStableInstructions ? runtimeToolPrompt : '',
-      clientSystemPrompt: clientInstructionPrompt,
-      finalPromptOverride: null,
-    });
+    /*
+     * NOTE(sync/main): this branch used to hand-roll the client instruction
+     * slice here (`clientInstructionParts` + `composeLiveInstructionPrompt`).
+     * origin/main extracted that composition into `composeChatAgentTextPayload`
+     * (see the call below), which owns the contributor registry and the OD Next
+     * exact-input coverage assertion. We adopt main's composer and feed this
+     * branch's three per-turn directives — done key, `<od-next>` suggestions and
+     * `<od-focus>` — through its `clientSystemPrompt` slot, which is the same
+     * position they occupied in the old array (after the title directive,
+     * ahead of the system prompt). Unlike `systemPrompt` they are NOT gated on
+     * `includeStableForPayload`: each carries this turn's nonce, so it has to be
+     * restated every turn or the marker it authorises cannot be validated.
+     */
     // Some models (notably claude-opus-4-7 with --include-partial-messages)
     // start their reply by echoing the top of the user message verbatim,
     // so the rendered chat shows a "# Instructions ..." block ahead of the
@@ -10606,92 +12084,197 @@ export async function startServer({
         : formIdForOverride !== null
           ? FORM_ANSWERED_GENERIC_OVERRIDE
           : '';
+    const agentFormOverride = isOdNextRequestStage && formIdForOverride
+      ? formIdForOverride === 'discovery' || formIdForOverride === 'task-type'
+        ? `The <user_first_prompt> contains submitted answers for the ${formIdForOverride} form. Apply them to the active OD Next plan. Do not re-emit that answered form or repeat fields it already answered.`
+        : `The <user_first_prompt> contains submitted answers for the ${formIdForOverride} form. Treat them as the active user turn and do not replay the answered form.`
+      : formOverride;
+    const agentEchoGuard = isOdNextRequestStage
+      ? OD_NEXT_BUNDLE_ECHO_GUARD_V2
+      : ECHO_GUARD;
+    const includeStableForPayload = isOdNextRequestStage || includeStableInstructions;
     const promptImagePaths = selectPromptImagePaths(
       def.id,
-      safeImages,
+      transportSourceImages,
       amrStagedImages,
     );
-    const composed = [
-      instructionPrompt
-        ? `# Instructions (read first)\n\n${formOverride}${instructionPrompt}${cwdHint}${linkedDirsHint}${ECHO_GUARD}\n\n---\n`
-        : cwdHint
-          ? `# Instructions\n\n${formOverride}${cwdHint}${linkedDirsHint}${ECHO_GUARD}\n\n---\n`
-          : linkedDirsHint
-            ? `# Instructions\n\n${formOverride}${linkedDirsHint}${ECHO_GUARD}\n\n---\n`
-            : formOverride
-              ? `# Instructions\n\n${formOverride}${ECHO_GUARD}\n\n---\n`
-              : '',
-      `# User request\n\n${userRequestPrompt}${attachmentHint}${commentHint}`,
-      promptImagePaths.length
-        ? `\n\n${promptImagePaths.map((p) => `@${p}`).join(' ')}`
-        : '',
-    ].join('');
-    run.promptTelemetry = buildPromptStackTelemetry({
+    const acpPromptImagePaths = odNextTaskInputSnapshot
+      ? excludeAcpImagePathsAlreadyDeliveredAsResources(
+          promptImagePaths,
+          odNextTaskInputSnapshot.attachmentPaths,
+        )
+      : promptImagePaths;
+    const taskConfigPendingFact = isOdNextRequestStage
+      ? odNextTaskInputSnapshot?.taskConfigText ?? ''
+      : '';
+    const requestInputPendingFact = isOdNextRequestStage
+      ? [
+          strategyTaskAtStart?.frozenSkillPackage
+            ? renderFrozenSkillRosterContext(strategyTaskAtStart.frozenSkillPackage)
+            : JSON.stringify({
+                schema: 'open-design.od-next-frozen-skill-package/v1',
+                state: 'missing',
+              }),
+          odNextTaskInputSnapshot?.requestInputText ?? '',
+        ].filter(Boolean).join('\n\n---\n\n')
+      : '';
+    const composedResult = strategyTaskAtStart
+      ? {
+          composedPrompt: persistedStrategyFinalText!,
+          clientInstructionPrompt: '',
+          instructionPrompt: '',
+        }
+      : composeChatAgentTextPayload({
+      formOverride: agentFormOverride,
+      daemonSystemPrompt: includeStableForPayload ? daemonSystemPrompt : '',
+      runtimeToolPrompt: includeStableForPayload ? runtimeToolPrompt : '',
+      researchCommandContract,
+      runContextPrompt,
+      connectedExternalMcpReference: mcpConnectedDirective,
+      browserUnavailableGuard: browserUsePromptGuard,
+      titleGenerationDirective: titleGenerationPrompt,
+      // This branch's per-turn directives ride in ahead of the system prompt,
+      // exactly where they sat in the pre-merge `clientInstructionParts` array.
+      // Each is keyed on this run's nonce, so they are unconditional while
+      // `systemPrompt` stays gated on the stable-slice decision.
+      clientSystemPrompt: [
+        hostProtocol.doneMarker,
+        hostProtocol.nextSteps,
+        hostProtocol.artifactFocus,
+        includeStableForPayload ? systemPrompt : '',
+      ]
+        .map((part) => (typeof part === 'string' ? part.trim() : ''))
+        .filter(Boolean)
+        .join('\n\n---\n\n'),
+      cwdReference: cwdHint,
+      linkedDirectoryReferences: linkedDirsHint,
+      echoGuard: agentEchoGuard,
+      requestOrStageText: userRequestPrompt,
+      projectAttachmentReferences: attachmentHint,
+      commentAttachmentReferences: commentHint,
+      imageReferences: promptImagePaths.map((p) => `@${p}`).join(' '),
+      strategyInputStage: strategyTaskAtStart?.inputStage ?? null,
+        });
+    const {
       composedPrompt: composed,
-      sections: [
-        { kind: 'formOverride', content: formOverride },
-        // Phase 1 explicitly needs redactedContent for these aggregate prompts:
-        // they are the quickest way to inspect the system context sent to the
-        // model when diagnosing Langfuse traces.
-        { kind: 'daemonSystemPrompt', content: daemonSystemPrompt },
-        { kind: 'runtimeToolPrompt', content: runtimeToolPrompt },
-        { kind: 'researchCommandContract', content: researchCommandContract },
-        { kind: 'runContextPrompt', content: runContextPrompt },
-        { kind: 'browserUsePromptGuard', content: browserUsePromptGuard },
-        { kind: 'clientSystemPrompt', content: clientInstructionPrompt },
-        { kind: 'echoGuard', content: ECHO_GUARD },
-        { kind: 'userRequest', content: userRequestPrompt },
-        { kind: 'skillPrompt', content: promptTelemetryParts?.skillPrompt },
-        {
-          kind: 'designSystemPrompt',
-          content: promptTelemetryParts?.designSystemPrompt,
+      clientInstructionPrompt,
+    } = composedResult;
+    if (strategyTaskAtStart?.inputStage === 'request') {
+      assertOdNextSemanticRequestFactProducerCoverage('request', {
+        prior_transcript: typeof priorTranscript === 'string' ? priorTranscript : '',
+        current_user_turn: currentPrompt,
+        headless_message_fallback: hasExplicitCurrentPrompt ? null : message,
+        stable_context_prompt: odNextStableContextPrompt ?? '',
+        task_config_pending_fact: taskConfigPendingFact,
+        request_input_pending_fact: requestInputPendingFact,
+        request_execution_configuration: {
+          sessionMode: runSessionMode,
+          locale,
+          research,
+          titleGeneration,
+          model,
+          reasoning,
+          serviceTier,
+          mediaExecution: run.mediaExecution,
+          executionProfile: executionProfileFromStreamFormat(def.streamFormat),
         },
-        {
-          kind: 'pluginStagePrompt',
-          content: promptTelemetryParts?.pluginStagePrompt,
-        },
-        { kind: 'cwdHint', content: cwdHint, metadata: cwd ? [cwd] : [] },
-        {
-          kind: 'linkedDirsHint',
-          content: linkedDirsHint,
-          metadata: linkedDirs,
-        },
-        {
-          kind: 'attachments',
-          content: attachmentHint,
-          metadata: safeAttachments,
-        },
-        {
-          kind: 'commentAttachments',
-          content: commentHint,
-          metadata: safeCommentAttachments,
-        },
-        {
-          kind: 'promptImagePaths',
-          content: promptImagePaths.join('\n'),
-          metadata: promptImagePaths,
-        },
-      ],
+        run_context_selection: context,
+        project_attachment_selection: safeAttachments,
+        comment_attachment_selection: safeCommentAttachments,
+        image_attachment_selection: promptImagePaths,
+      });
+    }
+    const promptTelemetry = buildPromptStackTelemetry({
+      composedPrompt: composed,
+      sections: strategyRunMapping
+        ? [{ kind: 'odNextExactFinalText', content: composed }]
+        : [
+            { kind: 'formOverride', content: agentFormOverride },
+            // Phase 1 explicitly needs redactedContent for these aggregate prompts:
+            // they are the quickest way to inspect the system context sent to the
+            // model when diagnosing Langfuse traces.
+            { kind: 'daemonSystemPrompt', content: daemonSystemPrompt },
+            { kind: 'runtimeToolPrompt', content: runtimeToolPrompt },
+            { kind: 'researchCommandContract', content: researchCommandContract },
+            { kind: 'runContextPrompt', content: runContextPrompt },
+            { kind: 'browserUsePromptGuard', content: browserUsePromptGuard },
+            { kind: 'clientSystemPrompt', content: clientInstructionPrompt },
+            { kind: 'echoGuard', content: ECHO_GUARD },
+            { kind: 'userRequest', content: userRequestPrompt },
+            { kind: 'skillPrompt', content: promptTelemetryParts?.skillPrompt },
+            {
+              kind: 'designSystemPrompt',
+              content: promptTelemetryParts?.designSystemPrompt,
+            },
+            {
+              kind: 'pluginStagePrompt',
+              content: promptTelemetryParts?.pluginStagePrompt,
+            },
+            { kind: 'cwdHint', content: cwdHint, metadata: cwd ? [cwd] : [] },
+            {
+              kind: 'linkedDirsHint',
+              content: linkedDirsHint,
+              metadata: linkedDirs,
+            },
+            {
+              kind: 'attachments',
+              content: attachmentHint,
+              metadata: safeAttachments,
+            },
+            {
+              kind: 'commentAttachments',
+              content: commentHint,
+              metadata: safeCommentAttachments,
+            },
+            {
+              kind: 'promptImagePaths',
+              content: promptImagePaths.join('\n'),
+              metadata: promptImagePaths,
+            },
+          ],
     });
+    try {
+      run.promptTelemetry = strategyRunMapping
+        ? bindOdNextExactSendPromptEvidence({
+            telemetry: promptTelemetry,
+            finalText: composed,
+            persisted: strategyRunMapping.finalText,
+            stage: strategyRunMapping.inputStage,
+          })
+        : promptTelemetry;
+    } catch (error) {
+      if (!(error instanceof InvalidOdNextExactSendPromptError)) throw error;
+      return failRun(
+        'OD_NEXT_TASK_STATE_INVALID',
+        error.message,
+      );
+    }
     lifecycle.mark('prompt_build_end');
     lifecycle.mark('launch_preflight_start');
     // (model resolution + AMR concretization hoisted above the resume guard)
     const executionProfile = executionProfileFromStreamFormat(def.streamFormat);
-    // Accumulates the agent's visible text this run so the close handler can
-    // tell whether the turn ended on a clarifying question form. The
-    // `od-plugin-authoring` plugin's turn-1 flow is to emit a
-    // `<question-form>` collecting the plugin brief, then STOP and wait for
-    // the user to answer (see the `discovery-question-form` atom in
-    // `plugins/scaffold.ts`). That turn legitimately closes with `code === 0`
-    // and no `generated-plugin/` artifacts yet, so the missing-artifacts
-    // guard must not treat it as a failure. We buffer the streamed text
-    // rather than read the persisted message because the assistant message
-    // row may not be wired up at close time. The buffer is capped because a
-    // discovery form streams near the top of the turn; we only need enough to
-    // validate the first complete form block (see
-    // `emittedRenderableQuestionForm`).
-    const CLARIFYING_QUESTION_BUFFER_CAP = 256 * 1024;
-    let clarifyingQuestionText = '';
+    // The agent's visible text this run accumulates onto `run.askUserScanText`
+    // (see the `send` hook below), so BOTH consumers of "did this turn end on a
+    // clarifying question form?" read one buffer:
+    //
+    //   · the missing-artifacts guard at child close. The `od-plugin-authoring`
+    //     plugin's turn-1 flow is to emit a `<question-form>` collecting the
+    //     brief, then STOP and wait for the user (see the
+    //     `discovery-question-form` atom in `plugins/scaffold.ts`). That turn
+    //     legitimately closes with `code === 0` and no `generated-plugin/`
+    //     artifacts yet, so the guard must not call it a failure;
+    //   · `finish()` in `runtimes/runs.ts`, which asks the canonical
+    //     `turnEndedByAskingUser` whether the turn handed the baton back to the
+    //     user before it stamps `endedWithUnfinishedWork`.
+    //
+    // It lives on the run rather than in this closure because `finish()` runs in
+    // the run service, which cannot see route locals. We buffer the streamed
+    // text rather than read the persisted message because the assistant message
+    // row may not be wired up at close time, and cap it because a clarification
+    // form streams near the top of the turn — enough to validate the first
+    // complete block (see `emittedRenderableQuestionForm`). Past the cap the
+    // signal fails CLOSED: the turn keeps reporting its TodoWrite verdict rather
+    // than inventing a form.
     let visibleAssistantText = '';
     // Reply text handed to the background memory extractor at child-close.
     // Captures the GUARDED, visible reply from BOTH channels a run can emit on:
@@ -10708,34 +12291,121 @@ export async function startServer({
     // by the artifact finalizer (see the emit handler below). 8 MiB comfortably
     // covers realistic artifact-bearing runs while bounding per-run memory.
     const PLAIN_ARTIFACT_STDOUT_CAP = 8 * 1024 * 1024;
-    const send = (event, data) => {
-      const lifecycleMarkers = runLifecycleMarkersForStreamEvent(event, data);
-      if (lifecycleMarkers.firstModelEventType) {
-        // Second argument is the PRODUCER's start, used only for the phase
-        // anchor. ACP emits `tool_use` at terminal status, so without it the
-        // anchor lands at tool completion. `time_to_first_model_event_ms`
-        // still measures to arrival and is unaffected.
-        lifecycle.markFirstModelEvent(
-          lifecycleMarkers.firstModelEventType,
-          lifecycleMarkers.firstModelEventAt,
+    // Everything this attempt put on stderr, kept as a bounded rolling window so
+    // the terminal `error` frame can carry the ORIGINAL cause and not only the
+    // daemon's own generic sentence. The window is deliberately larger than the
+    // tail the card shows, so the tail is always computed over a full slice of
+    // final output rather than over whatever happened to arrive last. Scoped to
+    // one spawn attempt: a same-run retry re-enters startChatRun and gets a
+    // fresh closure, so a failed attempt's output can never be attributed to the
+    // next one's error frame.
+    const FAILURE_STDERR_WINDOW_CAP = 32 * 1024;
+    let failureStderrWindow = '';
+    // Run instrumentation sits ON the path the model's bytes travel: `send`
+    // is the single choke point every stream event passes through on its way
+    // to the user, and the strategy's close-time tail is broadcast from the
+    // child-close handler. A throw from instrumentation there does not cost an
+    // analytics field, it costs the user the entire reply — so every mark goes
+    // through here and its failures are contained to itself. The guard is
+    // scoped to the marks alone; nothing that decides what the user receives
+    // is inside it.
+    let lifecycleTelemetryFaultWarned = false;
+    const recordRunTelemetry = (label: string, record: () => void): void => {
+      try {
+        record();
+      } catch (error) {
+        // One line per run, not per event: a broken classifier would otherwise
+        // log once per delta and bury the runs around it.
+        if (lifecycleTelemetryFaultWarned) return;
+        lifecycleTelemetryFaultWarned = true;
+        console.warn(
+          `[telemetry] run lifecycle instrumentation failed (${label}); run timing will be incomplete`,
+          error,
         );
       }
-      if (lifecycleMarkers.firstVisibleOutput) {
+    };
+    // The single rule for "did the user actually receive something". Both
+    // emission paths apply it: `send` for the live stream, and the strategy's
+    // close-time tail, which cannot re-enter `send` because the protocol is
+    // already finished. Keeping one rule is what stops the two paths from
+    // disagreeing about what counts as visible output.
+    const applyVisibleOutputMarks = (
+      markers: RunLifecycleStreamEventMarkers,
+    ): void => {
+      // Sole owner of `first_visible_output`. A mark here means the bytes
+      // really did leave the daemon — past the title-marker stripper, past the
+      // role-marker guard, past the strategy protocol, past close-time
+      // buffering. Do not stamp this mark from a decode site: doing so is what
+      // made `time_to_first_visible_output_ms` identical to
+      // `time_to_first_token_ms` on every run.
+      if (markers.firstVisibleOutput) {
         lifecycle.mark('first_visible_output');
       }
-      if (lifecycleMarkers.firstArtifactWrite) {
+      if (markers.firstArtifactWrite) {
         lifecycle.mark('first_artifact_write');
       }
+    };
+    const send = (event, data) => {
+      if (event === 'agent' && data?.type === 'usage') {
+        physicalSessionUsage.observe(event, data);
+      }
+      if (strategyProtocol && event === 'agent' && data?.type === 'tool_use') {
+        strategyToolUseCount += 1;
+      }
+      if (
+        strategyProtocol
+        && event === 'agent'
+        && data?.type === 'text_delta'
+        && typeof data.delta === 'string'
+      ) {
+        const delta = strategyProtocol.push(data.delta);
+        if (!delta) return;
+        strategyVisibleEmitted += delta;
+        data = { ...data, delta };
+      } else if (
+        strategyProtocol
+        && event === 'stdout'
+        && typeof data?.chunk === 'string'
+      ) {
+        const chunk = strategyProtocol.push(data.chunk);
+        if (!chunk) return;
+        strategyVisibleEmitted += chunk;
+        data = { ...data, chunk };
+      }
+      recordRunTelemetry(`stream event ${event}`, () => {
+        const lifecycleMarkers = runLifecycleMarkersForStreamEvent(event, data);
+        if (lifecycleMarkers.firstModelEventType) {
+          // Second argument is the PRODUCER's start, used only for the phase
+          // anchor. ACP emits `tool_use` at terminal status, so without it the
+          // anchor lands at tool completion. `time_to_first_model_event_ms`
+          // still measures to arrival and is unaffected.
+          //
+          // Stamped only from this live path. It records when the daemon SAW
+          // the model respond, so the close-time tail below — a re-emission of
+          // something seen long before — must not claim it, or a withheld
+          // reply would drag every phase boundary to the end of the run.
+          lifecycle.markFirstModelEvent(
+            lifecycleMarkers.firstModelEventType,
+            lifecycleMarkers.firstModelEventAt,
+          );
+        }
+        applyVisibleOutputMarks(lifecycleMarkers);
+      });
+      // `send` is the ONE sink every visible-text path reaches: `emitAgentEvent`
+      // funnels here, and so does `emitGuardedTextDelta`, which bypasses
+      // `emitAgentEvent` entirely for json-event-stream / copilot / ACP. Folding
+      // this signal at `emitAgentEvent` instead silently dropped those runtime
+      // families — the whole opencode family included.
       if (
         event === 'agent' &&
         data &&
         data.type === 'text_delta' &&
         typeof data.delta === 'string' &&
-        clarifyingQuestionText.length < CLARIFYING_QUESTION_BUFFER_CAP
+        (run.askUserScanText?.length ?? 0) < ASK_USER_SCAN_CAP
       ) {
-        clarifyingQuestionText = (clarifyingQuestionText + data.delta).slice(
+        run.askUserScanText = ((run.askUserScanText ?? '') + data.delta).slice(
           0,
-          CLARIFYING_QUESTION_BUFFER_CAP,
+          ASK_USER_SCAN_CAP,
         );
       }
       if (
@@ -10745,6 +12415,48 @@ export async function startServer({
         typeof data.delta === 'string'
       ) {
         visibleAssistantText += data.delta;
+        const doneCapture = advanceAuthenticatedDoneCapture({
+          fullVisibleText: visibleAssistantText,
+          delta: data.delta,
+          key: typeof run.doneKey === 'string' ? run.doneKey : '',
+          state: {
+            markerTail: run.completionMarkerTail,
+            awaitingConclusion: run.completionMarkerAwaitingConclusion,
+            authenticatedConclusion: run.authenticatedDoneConclusion,
+          },
+        });
+        run.completionMarkerTail = doneCapture.markerTail;
+        run.completionMarkerAwaitingConclusion = doneCapture.awaitingConclusion;
+        run.authenticatedDoneConclusion = doneCapture.authenticatedConclusion;
+      } else if (event === 'stdout' && data && typeof data.chunk === 'string') {
+        // Plain runtimes have no existing full text_delta accumulator. Reuse
+        // the bounded artifact stdout head rather than retaining a second
+        // unbounded copy solely for completion detection. The cap is already
+        // the daemon's declared realistic-output bound; once exceeded we fail
+        // closed on a NEW marker, but can still finish a marker seen before it.
+        run.plainStdoutTotalBytes = (run.plainStdoutTotalBytes ?? 0) + data.chunk.length;
+        if ((run.plainArtifactStdout?.length ?? 0) < PLAIN_ARTIFACT_STDOUT_CAP) {
+          run.plainArtifactStdout =
+            ((run.plainArtifactStdout ?? '') + data.chunk).slice(0, PLAIN_ARTIFACT_STDOUT_CAP);
+        }
+        if (
+          run.plainStdoutTotalBytes <= PLAIN_ARTIFACT_STDOUT_CAP
+          || run.completionMarkerAwaitingConclusion
+        ) {
+          const doneCapture = advanceAuthenticatedDoneCapture({
+            fullVisibleText: run.plainArtifactStdout ?? '',
+            delta: data.chunk,
+            key: typeof run.doneKey === 'string' ? run.doneKey : '',
+            state: {
+              markerTail: run.completionMarkerTail,
+              awaitingConclusion: run.completionMarkerAwaitingConclusion,
+              authenticatedConclusion: run.authenticatedDoneConclusion,
+            },
+          });
+          run.completionMarkerTail = doneCapture.markerTail;
+          run.completionMarkerAwaitingConclusion = doneCapture.awaitingConclusion;
+          run.authenticatedDoneConclusion = doneCapture.authenticatedConclusion;
+        }
       }
       // Accumulate the visible reply for the memory extractor from whichever
       // channel this agent family uses: `agent` text_delta (structured streams)
@@ -10773,15 +12485,17 @@ export async function startServer({
       // head to the tail-biased run.events at their exact stream offset, so no
       // artifact is lost and none is double-counted regardless of where in the
       // stream it appears.
-      if (event === 'stdout' && data && typeof data.chunk === 'string') {
-        run.plainStdoutTotalBytes = (run.plainStdoutTotalBytes ?? 0) + data.chunk.length;
-        if ((run.plainArtifactStdout?.length ?? 0) < PLAIN_ARTIFACT_STDOUT_CAP) {
-          run.plainArtifactStdout =
-            ((run.plainArtifactStdout ?? '') + data.chunk).slice(0, PLAIN_ARTIFACT_STDOUT_CAP);
-        }
+      if (event === 'stderr' && data && typeof data.chunk === 'string' && data.chunk) {
+        failureStderrWindow = `${failureStderrWindow}${data.chunk}`.slice(
+          -FAILURE_STDERR_WINDOW_CAP,
+        );
       }
-      persistRunEventToAssistantMessage(db, run, event, data);
-      design.runs.emit(run, event, data);
+      // One decoration point for both consumers below: the live SSE client and
+      // the persisted assistant message get the same error payload, so a reload
+      // shows exactly what the run showed.
+      const outgoing = withFailureStderrTail(event, data, failureStderrWindow);
+      persistRunEventToAssistantMessage(db, run, event, outgoing);
+      design.runs.emit(run, event, outgoing);
     };
     const retryAnalyticsBase = (decision, failure, errorCode) => {
       const runProjectKind = resolveRunProjectKindForAnalytics({
@@ -10840,6 +12554,7 @@ export async function startServer({
     // drive a second close-handler pass that finalizes the run as failed before
     // the retry ever spawns.
     const tearDownAttemptForRetry = () => {
+      cleanupOdNextRunInputProjection();
       // Snapshot the failing attempt's child + process group BEFORE we detach
       // them, so the reap targets THIS attempt's group and never the next one.
       const priorChild = run.child;
@@ -10854,16 +12569,12 @@ export async function startServer({
       // the CAPTURED pgid — the SIGKILL escalation is bound to it, so it can
       // never hit the next attempt's group (the cross-generation kill fixed in
       // #5202). On win32 / no pgid, fall back to signalling the direct child.
-      const reaped = design.runs.reapProcessGroup(priorProcessGroupId);
-      if (
-        !reaped &&
-        priorChild &&
-        typeof priorChild.kill === 'function' &&
-        priorChild.exitCode === null &&
-        !priorChild.killed
-      ) {
-        try { priorChild.kill('SIGTERM'); } catch {}
-      }
+      const termination = design.runs.terminateProcessTree(
+        run,
+        priorChild,
+        priorProcessGroupId,
+        { reason: 'retry_generation_replaced' },
+      );
       run.status = 'queued';
       run.updatedAt = Date.now();
       run.child = null;
@@ -10892,6 +12603,7 @@ export async function startServer({
         ...run.analyticsTelemetry,
         startRequestedAt: run.analyticsTelemetry?.startRequestedAt ?? run.createdAt,
       };
+      return termination;
     };
     const spawnRetryAttempt = (retryChatBody = chatBody) => {
       void startChatRun(retryChatBody, run).catch((err) => {
@@ -10917,16 +12629,31 @@ export async function startServer({
     // and finalizes the queued run, and the callback re-checks cancel/terminal
     // state in case it fires first.
     const scheduleRetryRestart = (delayMs, retryChatBody = chatBody) => {
-      tearDownAttemptForRetry();
+      const termination = tearDownAttemptForRetry();
       const wait = Number.isFinite(delayMs) && delayMs > 0 ? delayMs : 0;
+      const spawnWhenQuiescent = () => {
+        void Promise.resolve(termination).then((result) => {
+          if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
+          if (!result?.quiescent) {
+            send('error', createSseErrorPayload(
+              'AGENT_EXECUTION_FAILED',
+              'The previous agent process tree could not be terminated; the retry was stopped before another model request was started.',
+              { retryable: false },
+            ));
+            finishWithRetryDecision('failed', 1, null, { allowRetry: false });
+            return;
+          }
+          spawnRetryAttempt(retryChatBody);
+        });
+      };
       if (wait <= 0) {
-        spawnRetryAttempt(retryChatBody);
+        spawnWhenQuiescent();
         return;
       }
       run.retryRestartTimer = setTimeout(() => {
         run.retryRestartTimer = null;
         if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
-        spawnRetryAttempt(retryChatBody);
+        spawnWhenQuiescent();
       }, wait);
     };
     const finalizeRetryTelemetry = (status, decision, failure, errorCode) => {
@@ -10992,7 +12719,16 @@ export async function startServer({
       if (typeof code === 'number') return code === 0 ? 'exit_0' : 'exit_nonzero';
       return 'unknown';
     };
-    const finishWithRetryDecision = (status, code = null, signal = null) => {
+    const finishStrategyAwarePhysicalRun = (status, code = null, signal = null) => {
+      const finished = finishRun(status, code, signal);
+      return finished;
+    };
+    const finishWithRetryDecision = (
+      status,
+      code = null,
+      signal = null,
+      { allowRetry = true } = {},
+    ) => {
       lifecycle.mark('finalize_start');
       flushRunMessageEvents(run);
       // Persist the transport-level close mechanism before classifying this
@@ -11031,6 +12767,7 @@ export async function startServer({
         cancelOrigin: run.cancelOrigin ?? null,
         terminalTrigger: run.terminalTrigger ?? null,
         events: run.events,
+        admissionEvidence: runAdmissionEvidenceForRun(run),
       });
       if (
         result === 'failed' &&
@@ -11069,6 +12806,7 @@ export async function startServer({
         hasNativeSession: !!run.conversationId && !!liveSessionId,
       });
       if (
+        allowRetry &&
         postToolResumeDecision?.shouldRetry &&
         !design.runs.isTerminal(run.status) &&
         run.conversationId &&
@@ -11093,6 +12831,7 @@ export async function startServer({
           model: safeModel ?? null,
           cwd: effectiveCwd,
           lastMessageId: run.assistantMessageId ?? null,
+          lastInputTokens: observedInputTokensForSession(),
         });
         run.nativeSessionRecovery = markNativeSessionCaptured({
           previous: run.nativeSessionRecovery,
@@ -11110,6 +12849,7 @@ export async function startServer({
           sessionId: liveSessionId,
           stablePromptHash: currentStableHash,
           stablePromptSections: currentStableSections,
+          lastInputTokens: observedInputTokensForSession(),
         };
         scheduleRetryRestart(postToolResumeDecision.retryDelayMs, {
           ...chatBody,
@@ -11125,7 +12865,7 @@ export async function startServer({
         attemptCount: run.retryAttemptCount ?? 0,
         sideEffects,
       });
-      if (decision.shouldRetry && !design.runs.isTerminal(run.status)) {
+      if (allowRetry && decision.shouldRetry && !design.runs.isTerminal(run.status)) {
         run.retryOriginalFailure ??= failure ?? undefined;
         if ((run.retryAttemptCount ?? 0) === 0) {
           run.retryOriginFailure = failure ? { ...failure } : null;
@@ -11188,6 +12928,16 @@ export async function startServer({
       run.failureCategory = result === 'failed' ? failure?.failure_category ?? null : null;
       run.failureDetail = result === 'failed' ? failure?.failure_detail ?? null : null;
       run.failureAction = result === 'failed' ? failure?.user_action ?? null : null;
+      // The classifier's own retryability verdict. Kept alongside `user_action`
+      // rather than derived from it: the two are written independently, so a
+      // failure can be non-retryable while still carrying an action other than
+      // `'none'` (install the CLI, switch model, recharge). Without this the
+      // chat can only re-derive retryability from the detail NAME, which is the
+      // drift the classification fields exist to end.
+      run.retryable =
+        result === 'failed' && typeof failure?.retryable === 'boolean'
+          ? failure.retryable
+          : null;
       // Stamp the classification onto the persisted assistant message too, so a
       // reload (or any daemon-side persistence without the live web error
       // handler) keeps the specific failure guidance instead of the coarse
@@ -11203,6 +12953,7 @@ export async function startServer({
           model: safeModel ?? null,
           cwd: effectiveCwd,
           lastMessageId: run.assistantMessageId ?? null,
+          lastInputTokens: observedInputTokensForSession(),
         });
         run.nativeSessionRecovery = markNativeSessionCaptured({
           previous: run.nativeSessionRecovery,
@@ -11229,7 +12980,7 @@ export async function startServer({
           });
         }
       }
-      finishRun(status, code, signal);
+      finishStrategyAwarePhysicalRun(status, code, signal);
       return false;
     };
     const mcpServers = buildLiveArtifactsMcpServersForAgent(def, {
@@ -11373,7 +13124,7 @@ export async function startServer({
           { retryable: false },
         ),
       );
-      return finishRun('failed', 1, null);
+      return finishStrategyAwarePhysicalRun('failed', 1, null);
     }
 
     let mmdRouteLaunchEnv = null;
@@ -11411,7 +13162,7 @@ export async function startServer({
             spawnEnvForAgent(
               def.id,
               {
-                ...createAgentRuntimeEnv(process.env, daemonUrl, toolTokenGrant),
+                ...createAgentRuntimeEnv(process.env, daemonUrl, toolTokenGrant, OD_NODE_BIN, inheritedEnvironment),
                 ...(def.env || {}),
               },
               configuredAgentEnv,
@@ -11501,7 +13252,7 @@ export async function startServer({
                 'AMR sign-in is required. Sign in to AMR Cloud again, then retry this run.',
               action: 'relogin',
             });
-            return finishRun('failed', 1, null);
+            return finishStrategyAwarePhysicalRun('failed', 1, null);
           }
         }
         // Logged in but no catalog at all AND no resolvable model: only now is
@@ -11510,7 +13261,7 @@ export async function startServer({
           send('error', createAmrModelUnavailablePayload(safeModel, {
             reason: 'model_catalog_unavailable',
           }));
-          return finishRun('failed', 1, null);
+          return finishStrategyAwarePhysicalRun('failed', 1, null);
         }
         // Otherwise fall through with the user's selected model and let vela's
         // `session/set_model` be the authoritative gate.
@@ -11520,7 +13271,7 @@ export async function startServer({
           typeof model === 'string' && model.trim() ? model : safeModel,
           { availableModels: [...liveModelIds] },
         ));
-        return finishRun('failed', 1, null);
+        return finishStrategyAwarePhysicalRun('failed', 1, null);
       }
       // NOTE: when the selected model is absent from the (possibly preset-only
       // or stale) catalog we intentionally do NOT fail-close. The cached/preset
@@ -11606,6 +13357,7 @@ export async function startServer({
         if (run.cancelRequested || design.runs.isTerminal(run.status)) {
           lifecycle.mark('launch_preflight_end');
           cleanupPromptFile();
+          cleanupOdNextRunInputProjection();
           return;
         }
         const preflight = await preflightCodexDefaultModel({
@@ -11617,6 +13369,7 @@ export async function startServer({
         if (run.cancelRequested || design.runs.isTerminal(run.status)) {
           lifecycle.mark('launch_preflight_end');
           cleanupPromptFile();
+          cleanupOdNextRunInputProjection();
           return;
         }
         if (preflight.status === 'compatible' || preflight.status === 'incompatible') {
@@ -11683,10 +13436,43 @@ export async function startServer({
     }
 
     let args;
+    const observeClaudeNativeChildBehavior =
+      def.id === 'claude' && strategyTaskAtStart !== null;
+    const nativeBuildPackageBindings =
+      def.id === 'claude'
+      && strategyTaskAtStart?.executionMode === 'complex'
+      && strategyTaskAtStart.inputStage === 'production'
+      && strategyTaskAtStart.planContract
+      && strategyTaskAtStart.planContractHash
+      && strategyRunMapping
+        ? (() => {
+            const version = run.preflightAgentCliVersion
+              ?? getDetectedRuntimeVersions(def.id)?.agentCliVersion;
+            const capability = resolveBundledOdNextRuntimeCapability({
+              agentId: def.id,
+              agentCliVersion: version,
+            });
+            if (capability.reason !== 'capability_resolved') {
+              throw new TypeError(
+                'Claude native Build Package bindings require the exact verified CLI tuple.',
+              );
+            }
+            return createOdNextNativeBuildPackageBindings({
+              taskExecutionId: strategyTaskAtStart.taskExecutionId,
+              taskRunIndex: strategyRunMapping.taskRunIndex,
+              planContractHash: strategyTaskAtStart.planContractHash,
+              plan: strategyTaskAtStart.planContract,
+            });
+          })()
+        : [];
     try {
+      // Optional argv flags are gated on the `--help` capability map, which used
+      // to be filled only by `GET /api/agents`. Probe it here so a daemon that
+      // has never served that route still builds the same argv as one that has.
+      await ensureDetectedRuntimeCapabilities(def.id, configuredAgentEnv);
       args = def.buildArgs(
         composed,
-        safeImages,
+        promptImagePaths,
         extraAllowedDirs,
         agentOptions,
         {
@@ -11694,12 +13480,18 @@ export async function startServer({
           hasPriorAssistantTurn,
           agentLogFilePath,
           promptFilePath: promptFile?.path,
-          resumeSessionId: agentResumeCtx.resumeSessionId,
+          resumeSessionId: agentResumePromptPolicy.resumeSessionId,
           newSessionId: agentResumeCtx.newSessionId,
           disablePlugins:
             def.id === 'codex'
             && run.externalPluginAnalytics?.externalPluginId
               === OPEN_DESIGN_PLUGIN_ID,
+          ...(nativeBuildPackageBindings.length > 0
+            ? { nativeBuildPackageBindings }
+            : {}),
+          ...(observeClaudeNativeChildBehavior
+            ? { observeNativeChildBehavior: true }
+            : {}),
         },
       );
     } catch (err) {
@@ -11732,7 +13524,7 @@ export async function startServer({
           { retryable: false },
         ),
       );
-      return finishRun('failed', 1, null);
+      return finishStrategyAwarePhysicalRun('failed', 1, null);
     }
 
     // Companion guard for non-shim Windows installs (e.g. a cargo-built
@@ -11760,7 +13552,7 @@ export async function startServer({
           { retryable: false },
         ),
       );
-      return finishRun('failed', 1, null);
+      return finishStrategyAwarePhysicalRun('failed', 1, null);
     }
 
     let persistDeliveredAgentSessionState = () => {};
@@ -11794,6 +13586,7 @@ export async function startServer({
             model: safeModel ?? null,
             cwd: effectiveCwd,
             lastMessageId: run.assistantMessageId ?? null,
+            lastInputTokens: observedInputTokensForSession(),
           });
           if (!agentCapturesSessionId) {
             run.nativeSessionRecovery = markNativeSessionCaptured({
@@ -11821,6 +13614,7 @@ export async function startServer({
             model: safeModel ?? null,
             cwd: effectiveCwd,
             lastMessageId: run.assistantMessageId ?? null,
+            lastInputTokens: observedInputTokensForSession(),
           });
           if (!agentCapturesSessionId) {
             run.nativeSessionRecovery = markNativeSessionCaptured({
@@ -11917,6 +13711,25 @@ export async function startServer({
       }
     };
     let forcedChildShutdownTimers = [];
+    let acpAttemptTermination = null;
+    const beginAcpAttemptTermination = (
+      reason = 'acp_terminal',
+      { gracefulWaitMs = 0 } = {},
+    ) => {
+      if (acpAttemptTermination) return acpAttemptTermination;
+      acpAttemptTermination = design.runs.terminateProcessTree(
+        run,
+        child,
+        run.processGroupId,
+        {
+          gracefulWaitMs,
+          termGraceMs: inactivityKillGraceMs,
+          killGraceMs: inactivityKillGraceMs,
+          reason,
+        },
+      );
+      return acpAttemptTermination;
+    };
     const clearForcedChildShutdown = () => {
       for (const timer of forcedChildShutdownTimers) clearTimeout(timer);
       forcedChildShutdownTimers = [];
@@ -11961,10 +13774,15 @@ export async function startServer({
         // only signals from this watchdog branch should be.
         artifactQuietShutdownRequested = true;
         if (acpSession?.abort) {
+          beginAcpAttemptTermination(
+            'acp_artifact_quiet_timeout',
+            { gracefulWaitMs: 100 },
+          );
           acpSession.abort();
+        } else {
+          if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
+          scheduleForcedChildShutdown();
         }
-        if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
-        scheduleForcedChildShutdown();
         return;
       }
       // OpenCode retries a 429 usage-limit silently and emits nothing on
@@ -12006,6 +13824,13 @@ export async function startServer({
         ? 'first_output_deadline'
         : 'inactivity_watchdog';
       send('error', stallPayload);
+      if (acpSession?.abort) {
+        beginAcpAttemptTermination(
+          `acp_${reason}_timeout`,
+          { gracefulWaitMs: 100 },
+        );
+        acpSession.abort();
+      }
       // A silent first-token hang is one of the safe transient failure shapes
       // this run is allowed to recover: classifyRunFailure maps the stall text
       // to a retryable `timeout` at `first_token_wait`, and decideSafeRunRetry
@@ -12017,11 +13842,10 @@ export async function startServer({
       if (retried) {
         watchdogRetryRestarted = true;
       }
-      if (acpSession?.abort) {
-        acpSession.abort();
+      if (!acpSession?.abort) {
+        if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
+        scheduleForcedChildShutdown();
       }
-      if (child && !child.killed) design.runs.signalChild(run, 'SIGTERM');
-      scheduleForcedChildShutdown();
     };
     const armFirstOutputWatchdog = () => {
       if (firstOutputSeen || firstOutputTimer || firstOutputTimeoutMs <= 0) return;
@@ -12056,7 +13880,57 @@ export async function startServer({
         artifactQuietPeriodMs,
         artifactRegistered,
       });
+    /**
+     * The progress clock (`run.lastAgentActivityAt` → `last_progress_age_ms`)
+     * stops at the moment the daemon gives up on this attempt.
+     *
+     * After a terminal verdict the agent is no longer making progress toward
+     * the user's task; whatever it emits next is a reaction to our teardown —
+     * a shutdown line on stderr, a late diagnostic promoted from that stderr,
+     * the bridge's own flushed bookkeeping. Letting any of it re-stamp the
+     * clock is what makes a run that sat silent for the whole timeout window
+     * report an age of a few hundred milliseconds, which is exactly the reading
+     * that sent the 2026-07-28 AMR incident's triage after the wrong window.
+     *
+     * Scoped to the attempt, not the run: a retry (or the resume-failed reseed)
+     * builds a fresh `startChatRun` closure, so the next attempt starts with an
+     * unfrozen clock and measures its own silence.
+     */
+    let progressClockFrozen = false;
+    const freezeProgressClock = () => {
+      progressClockFrozen = true;
+    };
+    /**
+     * The ACP bridge has reached a terminal verdict for this attempt. Hand the
+     * attempt over to the close handler under THAT verdict while the
+     * generation-bound process-tree terminator owns teardown.
+     *
+     * Retiring the outer chat inactivity watchdog is the point. Without that
+     * ownership transfer, a child that lingers past the ceiling lets
+     * `failForInactivity` overwrite `terminal_trigger` with
+     * `inactivity_watchdog` and emit a second failure.
+     *
+     * The terminator captures this attempt's child and process group, waits for
+     * quiescence, and escalates without ever consulting a retry's replacement
+     * `run.child`.
+     */
+    const retireAttemptOnAcpVerdict = () => {
+      freezeProgressClock();
+      clearInactivityWatchdog();
+      beginAcpAttemptTermination('acp_verdict');
+    };
     const noteAgentActivity = () => {
+      // Once this attempt has a terminal verdict, nothing the child says may
+      // restart any of its clocks — not the progress timestamp, and not the
+      // inactivity watchdog. Bailing here rather than only skipping the
+      // timestamp is load-bearing: the raw `child.stderr` handler routes every
+      // late byte through this helper, so a child that logs while ignoring
+      // SIGTERM would otherwise re-arm the very watchdog
+      // `retireAttemptOnAcpVerdict` just cleared, and that timer firing before
+      // forced shutdown reaps the child terminalizes the run a second time
+      // under `inactivity_watchdog`. The token TTL is moot for the same reason:
+      // this attempt is over, and a retry builds a fresh closure.
+      if (progressClockFrozen) return;
       // E-lite: stamp the last-activity clock BEFORE the disabled-watchdog bail
       // so `last_progress_age_ms` is recorded even when the watchdog is off.
       run.lastAgentActivityAt = Date.now();
@@ -12117,7 +13991,7 @@ export async function startServer({
           'Install it and refresh the agent list (GET /api/agents) before retrying.',
         { retryable: true },
       ));
-      return finishRun('failed', 1, null);
+      return finishStrategyAwarePhysicalRun('failed', 1, null);
     }
     const browserUseRuntimeEnv = run.browserUse
       ? {
@@ -12131,7 +14005,7 @@ export async function startServer({
     const agentSpawnEnv = spawnEnvForAgent(
       def.id,
       {
-        ...createAgentRuntimeEnv(process.env, daemonUrl, toolTokenGrant),
+        ...createAgentRuntimeEnv(process.env, daemonUrl, toolTokenGrant, OD_NODE_BIN, inheritedEnvironment),
         ...(def.env || {}),
         ...browserUseRuntimeEnv,
       },
@@ -12150,18 +14024,20 @@ export async function startServer({
           message: 'AMR sign-in is required. Sign in to AMR Cloud again, then retry this run.',
           action: 'relogin',
         });
-        return finishRun('failed', 1, null);
+        return finishStrategyAwarePhysicalRun('failed', 1, null);
       }
     }
     const odMediaEnv = createOpenDesignToolEnv({
       daemonUrl,
       projectDir: cwd,
       projectId: typeof projectId === 'string' ? projectId : null,
+      workspaceScope: run.workspaceScope,
     });
     if (run.cancelRequested || design.runs.isTerminal(run.status)) {
       cleanupPromptFile();
       revokeToolToken('child_exit');
       unregisterChatAgentEventSink();
+      cleanupOdNextRunInputProjection();
       return;
     }
 
@@ -12179,12 +14055,30 @@ export async function startServer({
       serviceTier: safeServiceTier,
       toolTokenExpiresAt: toolTokenGrant?.expiresAt ?? null,
     });
+    /*
+     * This turn's done key, published BEFORE the child is spawned.
+     *
+     * Ordering is the whole contract: the chat client only honours a
+     * `<od-done key="…"/>` marker whose key matches the one it has already
+     * seen for this turn, so the key event must land ahead of the first
+     * `text_delta` on both the live stream and the persisted event list. It is
+     * emitted as a normal agent event so it rides the same path as everything
+     * else — persisted into the assistant message and replayed on reconnect —
+     * rather than needing a message column of its own.
+     */
+    if (typeof run.doneKey === 'string' && run.doneKey) {
+      send('agent', { type: 'done_key', key: run.doneKey });
+    }
     noteAgentActivity();
 
     let child;
     let acpSession = null;
     let writePromptToChildStdin = false;
     let spawnedAgentEnv = null;
+    // The stream handler is block-scoped to its parser branch, but the OpenCode
+    // post-run child export runs in the shared close handler below — after the
+    // stream that produced the candidates is gone.
+    let jsonEventStreamHandler: ReturnType<typeof createJsonEventStreamHandler> | null = null;
     let agentStdoutTail = '';
     let agentStderrTail = '';
     const agentStderrFilter = createAgentStderrVisibilityFilter(agentId);
@@ -12206,7 +14100,8 @@ export async function startServer({
       const stdinMode =
         def.promptViaStdin ||
         def.streamFormat === 'acp-json-rpc' ||
-        def.streamFormat === 'dsh-profile-jsonl'
+        def.streamFormat === 'dsh-profile-jsonl' ||
+        def.streamFormat === CODEX_APP_SERVER_STREAM_FORMAT
           ? 'pipe'
           : 'ignore';
       const env = applyAgentLaunchEnv({
@@ -12219,6 +14114,7 @@ export async function startServer({
           runId: run.id,
           conversationId: run.conversationId,
           runAttempt: openDesignAmrRunAttempt({
+            cumulativeRetryAttemptCount: run.cumulativeRetryAttemptCount,
             retryAttemptCount: run.retryAttemptCount,
             manualResumeAttemptCount: run.manualResumeAttemptCount,
           }),
@@ -12280,6 +14176,12 @@ export async function startServer({
         // to apply as-is.
         ...(opencodeConfigContent
           ? { [isMiMoContent ? 'MIMOCODE_CONFIG_CONTENT' : 'OPENCODE_CONFIG_CONTENT']: opencodeConfigContent }
+          : {}),
+        // Daemon-owned resolver for task-input: references. Keep this last so
+        // configured/BYOK/runtime env cannot redirect the Agent from the
+        // verified Run projection back to mutable or canonical bytes.
+        ...(odNextTaskInputSnapshot
+          ? { OD_TASK_INPUT_DIR: odNextTaskInputSnapshot.projectionDir }
           : {}),
       }, agentLaunch);
       spawnedAgentEnv = env;
@@ -12359,7 +14261,7 @@ export async function startServer({
         });
       }
       if (
-        def.promptViaStdin &&
+        (def.promptViaStdin || def.streamFormat === CODEX_APP_SERVER_STREAM_FORMAT) &&
         child.stdin &&
         def.streamFormat !== 'pi-rpc' &&
         def.streamFormat !== 'dsh-profile-jsonl'
@@ -12384,7 +14286,10 @@ export async function startServer({
             );
           }
         });
-        writePromptToChildStdin = true;
+        // The app-server transport owns its own stdin writes (JSON-RPC
+        // frames); only the plain stdin-prompt adapters hand the composed
+        // prompt over on this channel.
+        writePromptToChildStdin = def.promptViaStdin === true;
       }
     } catch (err) {
       cleanupPromptFile();
@@ -12398,7 +14303,7 @@ export async function startServer({
           ? err.message
           : `spawn failed: ${err.message}`,
       ));
-      finishRun('failed', 1, null);
+      finishStrategyAwarePhysicalRun('failed', 1, null);
       return;
     }
 
@@ -12646,16 +14551,16 @@ export async function startServer({
           const succeeded = orchestratorResult.status === 'shipped'
             || orchestratorResult.status === 'below_threshold';
           if (run.cancelRequested) {
-            finishRun('canceled', 1, null);
+            finishStrategyAwarePhysicalRun('canceled', 1, null);
           } else if (succeeded) {
             finishRun('succeeded', 0, null);
           } else {
-            finishRun('failed', 1, null);
+            finishStrategyAwarePhysicalRun('failed', 1, null);
           }
         } catch (err) {
           flushVisibleAgentStderr();
           send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', err instanceof Error ? err.message : String(err)));
-          finishRun('failed', 1, null);
+          finishStrategyAwarePhysicalRun('failed', 1, null);
         } finally {
           critiqueRunRegistry.unregister(critiqueProjectKey, critiqueRunId);
         }
@@ -12715,10 +14620,33 @@ export async function startServer({
       'text_delta',
       'thinking_delta',
     ]);
+    /*
+     * `first_token` only. `first_visible_output` has exactly ONE owner: the
+     * `send()` path, which asks `runLifecycleMarkersForStreamEvent` whether the
+     * frame actually carried characters.
+     *
+     * Co-stamping both here made the two boundaries the same number by
+     * construction, and Claude is the case where they genuinely differ: its
+     * extended thinking arrives as `thinking_delta` frames whose `thinking` is
+     * the empty string (20 of 20 frames on a 26.5s turn measured straight off
+     * the CLI). A token really was produced — thinking tokens are billed — so
+     * `first_token` belongs here; nothing was drawn, so the pixel boundary does
+     * not. Run 1cc48454-e9a7-411a-981e-4325fcca95dd reported
+     * `time_to_first_visible_output_ms: 9926` for a turn whose first on-screen
+     * character landed at 46,729ms.
+     *
+     * A runtime whose visible output never reaches `send()` simply leaves the
+     * mark unset, and `summarizeRunTimingAnalytics` already falls back to
+     * `firstTokenAt` — i.e. exactly the value this line used to write.
+     */
     const noteFirstTokenAt = (timestamp = Date.now()) => {
-      if (run.analyticsTelemetry?.firstTokenAt) return;
-      lifecycle.mark('first_token', timestamp);
-      lifecycle.mark('first_visible_output', timestamp);
+      // Telemetry-only, and every call site sits inside a live stream handler
+      // that is mid-way through delivering a delta. Same contract as the marks
+      // in `send`: a fault here costs a timing field, never the reply.
+      recordRunTelemetry('first token', () => {
+        if (run.analyticsTelemetry?.firstTokenAt) return;
+        lifecycle.mark('first_token', timestamp);
+      });
     };
     // Subsegment markers inside `processSpawnedAt -> firstTokenAt` (#3408 §4).
     // `cliReadyAt` is the first well-formed adapter output and is stamped for
@@ -12755,14 +14683,120 @@ export async function startServer({
     const runGuard = createRoleMarkerGuard('run');
     let runWarned = false;
     const visibleStdoutControlStripper = new TerminalControlSequenceStripper();
-    const titleMarkerStripper = createAgentTitleMarkerStripper({
+    // Strip on every Run, announce on the Runs that asked for a title. The
+    // directive lives in the agent's own session history, so a resumed CLI can
+    // repeat the marker on a later turn that never requested one — gating the
+    // stripper on the request is what let `<od-title>` reach the chat.
+    //
+    // NOTE(sync/main): origin/main fixed that leak AT THIS CALL SITE (pass
+    // `enabled: true`, swap the announce callback). This branch fixed the same
+    // leak one layer down, in `title-marker.ts`: the stripper now always scans,
+    // and `enabled` means "adopt this title", not "strip it". Both fixes are
+    // kept — the call site below reads correctly against the new semantics, and
+    // main's regression test (`enabled: true` + no-op emit) still passes.
+    const rawTitleMarkerStripper = createAgentTitleMarkerStripper({
       enabled: Boolean(titleGenerationRequested),
       emitTitle: (title) => send('agent', { type: 'conversation_title', title }),
     });
+    /*
+     * 评审剧场的通信语法**兜底剥离**(见 `panel-grammar-strip.ts` 的注释)。
+     *
+     * 挂在这里而不是逐个改五个调用点:所有可见文本都要先过 `titleMarkerStripper`,
+     * 把它包一层,五处自动都有,以后再多一处也不会漏。
+     * 顺序是「先剥标题、再剥面板语法」—— 两者互不重叠,谁先都行,
+     * 但两个都必须有各自的半截缓冲,否则会闪出半截标签。
+     */
+    const panelGrammarStripper = createPanelGrammarStripper();
+    /*
+     * **思考流**的那一份 —— 独立实例,不和正文共用。
+     *
+     * 上面那个只盖住 `text_delta`。`thinking_delta` 走的是另一条路
+     * (`sendAgentEvent` 里非 text_delta 一律直接 `emitAgentEvent`),
+     * 2026-08-26 建兜底时漏掉了它,于是剧场语法照旧原样进思考区**并落库**
+     * (`chat-run-messages.ts` 把 `thinking_delta` 存成 `{ kind: 'thinking' }`),
+     * 刷新之后永远还在。用户第五次撞到的就有这一半。
+     *
+     * 为什么必须是**第二个实例**而不是复用上面那个:剥离器带「半截标记」缓冲,
+     * 两条流交错喂进同一个缓冲会互相串位 —— 正文的半截会被思考流的下一片接上,
+     * 拼出一个两边都没写过的东西。各自一份缓冲是唯一安全的做法。
+     */
+    const thinkingGrammarStripper = createPanelGrammarStripper();
+    /*
+     * 这一轮的「下一步建议」(`<od-next key="…">`,见 `next-step-marker.ts`)。
+     *
+     * 和上面两个剥离器串在同一条链上,理由一样:所有可见文本都要过这条链,
+     * 挂在这里就不会漏掉任何一个调用点。它排在最外层 —— 看到的正是客户端
+     * 将要看到的文本,判据和最终屏幕上的东西一致。
+     *
+     * key 只管**采纳**,不管**剥离**:key 不对、没写 key、这一轮压根没 key,
+     * 标记照样吃掉。这是 `<od-title>` 拿线上事故换来的规矩。
+     */
+    const nextStepMarkerStripper = createNextStepMarkerStripper({
+      key: typeof run.doneKey === 'string' && run.doneKey ? run.doneKey : null,
+      emit: (suggestions) => send('agent', { type: 'next_steps', suggestions }),
+    });
+    /*
+     * 这一轮的「显示什么」(`<od-focus …/>`,见 `artifact-focus-marker.ts`)。
+     *
+     * 和上面三个剥离器串在同一条链上,理由一样:所有可见文本都要过这条链,
+     * 挂在这里就不会漏掉任何一个调用点。
+     *
+     * key 只管**采纳**,不管**剥离** —— 和 `<od-next>` 同一条规矩,也是
+     * `<od-title>` 拿线上事故换来的。
+     *
+     * `open` 还要过一道文件系统门:声明的路径必须落在项目根之内(realpath 之后
+     * 再判一次,软链走不出去),而且文件必须**非空**。空白预览在用户眼里就是
+     * bug,所以标记先到、字节后到时,标记是**攒着**而不是丢掉 —— 由
+     * `settle()` 在每个 tool_result 之后补发。
+     */
+    const artifactFocusStripper = createArtifactFocusMarkerStripper({
+      key: typeof run.doneKey === 'string' && run.doneKey ? run.doneKey : null,
+      projectRoot: typeof cwd === 'string' && cwd ? cwd : null,
+      emit: (selection) => send('agent', { type: 'artifact_focus', ...selection }),
+    });
+    const titleMarkerStripper = {
+      strip: (delta: string) =>
+        nextStepMarkerStripper.strip(
+          artifactFocusStripper.strip(
+            panelGrammarStripper.strip(rawTitleMarkerStripper.strip(delta)),
+          ),
+        ),
+      flush: () => {
+        const head = nextStepMarkerStripper.strip(
+          artifactFocusStripper.strip(
+            panelGrammarStripper.strip(rawTitleMarkerStripper.flush()),
+          ),
+        );
+        const mid = nextStepMarkerStripper.strip(
+          artifactFocusStripper.strip(panelGrammarStripper.flush()),
+        );
+        const tail = nextStepMarkerStripper.strip(artifactFocusStripper.flush());
+        return head + mid + tail + nextStepMarkerStripper.flush();
+      },
+    };
 
     function flushAgentTitleMarkerBuffer() {
       const visible = titleMarkerStripper.flush();
       if (visible) emitGuardedTextDelta(visible);
+      /*
+       * 思考流攒着的半截 —— 流结束了,它终究不是标记,原样吐回去。
+       *
+       * 「不吞用户的字」和「不闪半截标签」是同一条规矩的两面(见
+       * `panel-grammar-strip.ts` 开头的两条硬要求)。走 `send` 而不是
+       * `emitAgentEvent`,是因为这里已经出了剥离器,再进一次收口会被自己
+       * 重新扣住,永远吐不出来。
+       */
+      const heldThinking = thinkingGrammarStripper.flush();
+      if (heldThinking) send('agent', { type: 'thinking_delta', delta: heldThinking });
+      /*
+       * Backstop for the empty-file gate. The normal release path is the
+       * `tool_result` hook in `emitAgentEvent` — the write lands, the result
+       * frame arrives, the bytes are there. This covers the runtime that
+       * reports no write event at all: the file is on disk by the time the
+       * stream ends, so one last probe turns a held marker into an event.
+       * Fire-and-forget on purpose; the run must not block on a stat.
+       */
+      void artifactFocusStripper.settle();
     }
 
     function guardTextDelta(delta) {
@@ -12914,6 +14948,41 @@ export async function startServer({
     // follows the result that triggered it in the stream. (PR #3375 review:
     // Copilot and ACP bypassed the guard by calling send('agent', …) directly.)
     function emitAgentEvent(ev: any) {
+      /*
+       * 思考流的剧场语法剥离 —— 位置是判据的一部分,不是随手挑的。
+       *
+       * 必须在 `send('agent', …)` **之前**:落库(`persistRunEventToAssistantMessage`)
+       * 就挂在 `send()` 里,晚一步这段协议就永久写进 `{ kind: 'thinking' }`,
+       * 刷新之后再也擦不掉。
+       *
+       * 必须在 `emitAgentEvent` 这一层而不是某个适配器里:这是 27 个 runtime
+       * 唯一都要经过的收口(见下面 tool timing 的同款理由),挂在这里就没有
+       * runtime 能从覆盖面里漂出去 —— 上一次正是"某条路径漏挂"栽的跟头。
+       *
+       * 整片都是标记时连事件都不发,免得思考区多出一格空的「Thoughts」;
+       * 但"模型已经在出字"这件事照记,否则首字时延会被记晚。
+       *
+       * ⚠️ 该不该扔看的是 `strippingConsumedTheWholeFrame` ——「上游到底送没送字符」,
+       * 不是「剥完还剩没剩」。W102(2026-09-03)在这里栽过:原来写的是 `if (!visible)`,
+       * 而 claude 的思考帧正文 100% 是空串,`strip('')` 也返回空串,于是**整个
+       * claude 家族的思考帧被 100% 丢掉** —— 壳头「思考中」永远不亮(规格 W11 明写
+       * 「哪怕 delta 为空」也要进入思考中),传输层拿这些帧当心跳的静默计时也一起谎报。
+       * 判据与真机数字见 `panel-grammar-strip.ts` 上那个函数的注释。
+       */
+      if (ev?.type === 'thinking_delta' && typeof ev.delta === 'string') {
+        const visible = thinkingGrammarStripper.strip(ev.delta);
+        if (strippingConsumedTheWholeFrame(ev.delta, visible)) {
+          noteFirstOutputEvent(ev);
+          return;
+        }
+        if (visible !== ev.delta) ev = { ...ev, delta: visible };
+      }
+      // Stamp tool call start/finish time here — the one choke point every runtime
+      // funnels through — so all 27 adapters get per-call durations without each
+      // one growing its own clock. Only fills what is missing (ACP already carries
+      // `startedAt`). See `runtimes/tool-timing.ts` for why both ends can be absent
+      // and why the web treats a sub-100ms difference as "unknown", not "fast".
+      stampToolTiming(ev);
       // Fold work-completeness signals (TodoWrite snapshot / truncation) off the
       // stream BEFORE the send, so run.lastTodoSnapshot / run.truncatedMidTurn are
       // set by the time finish() derives run.endedWithUnfinishedWork (#1247/#1060).
@@ -12921,6 +14990,17 @@ export async function startServer({
       noteFirstOutputEvent(ev);
       send('agent', ev);
       observeToolEventForLoop(ev);
+      /*
+       * The `<od-focus open="…">` release point.
+       *
+       * A tool result is the daemon's only runtime-agnostic "the filesystem may
+       * have changed" signal — Write, Edit, and a Bash heredoc all land here,
+       * and this is the choke point every one of the 27 adapters funnels
+       * through, so no runtime can drift out of coverage. `settle()` is a no-op
+       * unless a marker is actually waiting on bytes, and it is idempotent, so
+       * calling it on every result costs one branch.
+       */
+      if (ev?.type === 'tool_result') void artifactFocusStripper.settle();
     }
 
     const sendAgentEvent = (ev) => {
@@ -12966,9 +15046,12 @@ export async function startServer({
           }));
           return;
         }
-        send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', agentStreamError, {
-          details: ev.raw ? { raw: ev.raw } : undefined,
-        }));
+        send('error', withAcpHandshakeFailureGuidance(
+          createSseErrorPayload('AGENT_EXECUTION_FAILED', agentStreamError, {
+            details: ev.raw ? { raw: ev.raw } : undefined,
+          }),
+          agentFailureIdentity(def),
+        ));
         return;
       }
       // First well-formed decoded stream event = CLI ready for the
@@ -12997,8 +15080,16 @@ export async function startServer({
       noteAgentActivity();
       // Role-marker guard for qoder / json-event-stream / pi-rpc (#3247).
       if (ev?.type === 'text_delta' && typeof ev.delta === 'string') {
+        // Decode time, captured BEFORE the emit. The gate has to run first to
+        // learn whether these bytes are a token at all, but the emit inside it
+        // fans the delta out to every SSE client and stamps
+        // `first_visible_output` on the way — reading the clock afterwards
+        // charges our own write latency to TTFT and can leave the visible-output
+        // mark a millisecond AHEAD of the token that produced it. See the
+        // matching sites in the Copilot and ACP handlers.
+        const decodedAt = Date.now();
         if (emitTitleFilteredGuardedTextDelta(ev.delta)) {
-          noteFirstTokenAt();
+          noteFirstTokenAt(decodedAt);
           agentProducedOutput = true;
         }
         return;
@@ -13027,6 +15118,31 @@ export async function startServer({
       plaintextStdoutBuffer.length = 0;
       return true;
     };
+    const flushBufferedPlaintextStdout = () => {
+      // Stamp from the first chunk's arrival only once the buffer is known to
+      // be visible; suppressed OAuth prompts must never report a first token.
+      if (plaintextStdoutBuffer.length > 0 && firstBufferedStdoutAt !== null) {
+        noteFirstTokenAt(firstBufferedStdoutAt);
+      }
+      for (const chunk of plaintextStdoutBuffer) {
+        const strippedText = visibleStdoutControlStripper.write(chunk.text);
+        const visibleText = titleMarkerStripper.strip(strippedText);
+        if (visibleText) send('stdout', { chunk: visibleText });
+      }
+      const flushedControlText = visibleStdoutControlStripper.flush();
+      const flushedTitleMarkerText =
+        titleMarkerStripper.strip(flushedControlText) + titleMarkerStripper.flush();
+      if (flushedTitleMarkerText) send('stdout', { chunk: flushedTitleMarkerText });
+      plaintextStdoutBuffer.length = 0;
+    };
+    const publishRuntimeChildEvidenceCoverage = (coverage) => {
+      if (!strategyTaskAtStart || !coverage) return;
+      sendAgentEvent({
+        type: 'diagnostic',
+        name: 'child_evidence_coverage_v1',
+        coverage,
+      });
+    };
 
     if (def.streamFormat === 'claude-stream-json') {
       const claude = createClaudeStreamHandler((ev) => {
@@ -13049,15 +15165,20 @@ export async function startServer({
           // authority on how a resume failure ends.
           if (
             (runtimeResumesSessionById(def) || def.resumesSessionViaAcpLoad === true) &&
-            agentResumeCtx.isResuming &&
             !run.resumeAutoReseeded &&
-            isAgentResumeFailure(def.id, agentStderrTail, agentStdoutTail)
+            resolveAgentResumeFailurePolicy({
+              agentId: def.id,
+              stderr: agentStderrTail,
+              stdout: agentStdoutTail,
+              isResuming: agentResumePromptPolicy.skipTranscript,
+              resumeSessionId: agentResumePromptPolicy.resumeSessionId,
+            }).resumeFailed
           ) {
             design.runs.emit(run, 'diagnostic', {
               type: 'agent_resume_failed_suppressed',
               agent_id: def.id,
               reason: 'resume_failed',
-              previous_session_id: agentResumeCtx.resumeSessionId ?? null,
+              previous_session_id: agentResumePromptPolicy.resumeSessionId ?? null,
             });
             return;
           }
@@ -13109,16 +15230,19 @@ export async function startServer({
               ?? rewriteKnownAgentStreamError(agentId, message, failureText);
           agentStreamErrorObservedBeforeCancellation = true;
           run.runtimeFailureObservedBeforeCancellation = true;
-          send('error', createSseErrorPayload(
-            structuredCode ?? diagnostic?.code ?? serviceCode ?? 'AGENT_EXECUTION_FAILED',
-            agentStreamError,
-            {
-              retryable: structuredCode
-                ? false
-                : diagnostic?.retryable
-                  ?? (serviceCode === 'AGENT_AUTH_REQUIRED' || serviceCode === 'RATE_LIMITED'),
-              ...(diagnostic ? { details: { detail: diagnostic.detail } } : {}),
-            },
+          send('error', withAcpHandshakeFailureGuidance(
+            createSseErrorPayload(
+              structuredCode ?? diagnostic?.code ?? serviceCode ?? 'AGENT_EXECUTION_FAILED',
+              agentStreamError,
+              {
+                retryable: structuredCode
+                  ? false
+                  : diagnostic?.retryable
+                    ?? (serviceCode === 'AGENT_AUTH_REQUIRED' || serviceCode === 'RATE_LIMITED'),
+                ...(diagnostic ? { details: { detail: diagnostic.detail } } : {}),
+              },
+            ),
+            agentFailureIdentity(def),
           ));
           return;
         }
@@ -13154,9 +15278,46 @@ export async function startServer({
         try {
           applyClaudeStreamJsonRunBookkeeping(run, ev);
         } catch {}
-      }, { suppressHtmlArtifactsAfterFileWrite: def.id === 'claude' });
+      }, {
+        suppressHtmlArtifactsAfterFileWrite: def.id === 'claude',
+        ...(observeClaudeNativeChildBehavior
+          ? {
+              suppressForwardedSubagentEvents: true,
+              onChildRuntimeFact: (fact) => sendAgentEvent({
+                type: 'diagnostic',
+                name: 'claude_child_runtime_fact',
+                ...fact,
+              }),
+              onChildToolRuntimeFact: (fact) => sendAgentEvent({
+                type: 'diagnostic',
+                name: 'claude_child_tool_runtime_fact',
+                ...fact,
+              }),
+            }
+          : {}),
+        ...(nativeBuildPackageBindings.length > 0
+          ? {
+              nativeBuildPackageBindings: nativeBuildPackageBindingMap(
+                nativeBuildPackageBindings,
+              ),
+            }
+          : {}),
+      });
       child.stdout.on('data', (chunk) => claude.feed(chunk));
-      child.on('close', () => claude.flush());
+      child.on('close', (code, signal) => {
+        claude.flush();
+        claude.finishOpenChildEvidence(
+          run.cancelRequested
+            ? 'canceled'
+            : run.terminalTrigger === 'first_output_deadline'
+              || run.terminalTrigger === 'inactivity_watchdog'
+              ? 'timeout'
+              : code === 0 && signal === null && !agentStreamError
+                ? 'complete'
+                : 'stream_incomplete',
+        );
+        publishRuntimeChildEvidenceCoverage(claude.childEvidenceCoverage());
+      });
     } else if (def.streamFormat === 'qoder-stream-json') {
       trackingSubstantiveOutput = true;
       const qoder = createQoderStreamHandler(sendAgentEvent);
@@ -13167,13 +15328,21 @@ export async function startServer({
         lastAgentEventPhase = summarizeAgentEventForInactivity(ev);
         noteAgentActivity();
         if (ev?.type === 'text_delta' && typeof ev.delta === 'string') {
+          // Decode time, read before the emit — see `sendAgentEvent`.
+          const decodedAt = Date.now();
           if (emitTitleFilteredGuardedTextDelta(ev.delta)) {
-            noteFirstTokenAt();
+            noteFirstTokenAt(decodedAt);
           }
           return;
         }
         noteFirstTokenFromAgentEvent(ev);
         emitAgentEvent(ev);
+      }, {
+        onChildRuntimeFact: (fact) => sendAgentEvent({
+          type: 'diagnostic',
+          name: 'claude_child_runtime_fact',
+          ...fact,
+        }),
       });
       child.stdout.on('data', (chunk) => copilot.feed(chunk));
       child.on('close', () => copilot.flush());
@@ -13199,8 +15368,8 @@ export async function startServer({
         prompt: composed,
         cwd: effectiveCwd,
         model: safeModel,
-        parentSession: agentResumeCtx.isResuming && agentResumeCtx.resumeSessionId
-          ? agentResumeCtx.resumeSessionId
+        parentSession: agentResumePromptPolicy.resumeSessionId
+          ? agentResumePromptPolicy.resumeSessionId
           : undefined,
         send: (channel, payload) => {
           if (channel === 'agent') {
@@ -13231,31 +15400,63 @@ export async function startServer({
             send(channel, payload);
           }
         },
-        imagePaths: def.supportsImagePaths ? amrStagedImages : [],
-        uploadRoot: UPLOAD_DIR,
+        imagePaths: def.supportsImagePaths ? promptImagePaths : [],
+        uploadRoot: odNextTaskInputSnapshot?.projectionDir ?? UPLOAD_DIR,
       });
     } else if (def.streamFormat === 'acp-json-rpc') {
       const acpStageTimeoutMs = resolveAcpStageTimeoutMs(def.inactivityTimeoutMs);
+      const knownPromptBudgetModel = findKnownModel(
+        def,
+        safeModel,
+        requestedLiveModelScope,
+      );
+      const knownContextWindowTokens =
+        knownPromptBudgetModel?.metadata?.contextWindowTokens ?? null;
       acpSession = attachAcpSession({
         child,
         prompt: composed,
         cwd: effectiveCwd,
         model: safeModel,
-        imagePaths: def.supportsImagePaths ? amrStagedImages : [],
+        promptBudgetContext: {
+          modelId: knownPromptBudgetModel?.id ?? null,
+          modelIdSource: knownPromptBudgetModel ? 'model_catalog' : 'unknown',
+          contextWindowTokens: knownContextWindowTokens,
+          contextWindowSource:
+            knownContextWindowTokens !== null
+              ? 'model_metadata'
+              : 'unknown',
+          priorSessionInputTokens: agentResumeCtx.isResuming
+            ? agentResumeCtx.storedInputTokens
+            : null,
+          priorSessionUsageSource:
+            agentResumeCtx.isResuming && agentResumeCtx.storedInputTokens !== null
+              ? 'agent_session'
+              : 'unknown',
+        },
+        imagePaths: def.supportsImagePaths ? acpPromptImagePaths : [],
+        resourcePaths: odNextTaskInputSnapshot?.attachmentPaths ?? [],
         mcpServers,
         envFormat: def.acpMcpEnvFormat ?? 'array',
+        // Lets the session withhold stdio MCP servers from agent builds that
+        // reject them (Kimi 0.37.0+). Unset for every other runtime, which
+        // leaves their `session/new` payload exactly as it is today.
+        stdioMcpRemovedInVersion: def.acpStdioMcpRemovedInVersion ?? null,
         executionProfile,
         completePromptOnTurnEnd: def.acpTurnEndCompletesPrompt === true,
         ...(def.id === 'amr' ? { modelUnavailableErrorCode: 'AMR_MODEL_UNAVAILABLE' } : {}),
         // Resume the prior upstream session (drives `session/load`) when the
         // resume-identity guard says it is safe; otherwise a fresh session/new.
-        ...(def.resumesSessionViaAcpLoad === true && agentResumeCtx.isResuming && agentResumeCtx.resumeSessionId
-          ? { resumeSessionId: agentResumeCtx.resumeSessionId }
+        ...(def.resumesSessionViaAcpLoad === true && agentResumePromptPolicy.resumeSessionId
+          ? { resumeSessionId: agentResumePromptPolicy.resumeSessionId }
           : {}),
         onCliReady: () => noteCliReadyAt(),
         onSessionInit: () => noteSessionInitDoneAt(),
         onPromptComplete: () => clearFirstOutputWatchdog(),
-        send: (event, data) => {
+        onTerminal: (kind) => beginAcpAttemptTermination(
+          `acp_${kind}`,
+          { gracefulWaitMs: kind === 'completed' ? 500 : 0 },
+        ),
+        send: (event, data, meta) => {
           if (event === 'error') {
             clearFirstOutputWatchdog();
             if (run.cancelRequested) return;
@@ -13276,7 +15477,21 @@ export async function startServer({
               noteFirstOutputEvent(data);
             }
           }
-          noteAgentActivity();
+          // Only bytes the agent produced advance the progress clock. The ACP
+          // bridge's `hostSynthesized` pairs are the daemon closing tools the
+          // agent left open, emitted from `fail()` just BEFORE the verdict;
+          // the terminal `error` is the verdict itself. Stamping the clock
+          // from either is what made a 30-minute stall report
+          // `last_progress_age_ms = 664`.
+          if (runtimeEmissionCountsAsAgentProgress(event, meta)) {
+            noteAgentActivity();
+          }
+          // ...and everything the child emits AFTER the verdict — its shutdown
+          // line on stderr, the diagnostic promoted from that line — is a
+          // reaction to the SIGTERM this error is about to trigger, not
+          // progress. Freeze here so the recorded age keeps describing the
+          // silence rather than our own teardown.
+          if (event === 'error') retireAttemptOnAcpVerdict();
           if (event === 'error') flushVisibleAgentStderr();
           if (def.id === 'amr' && event === 'error') {
             const failure = classifyAmrAccountFailureSignal({
@@ -13308,33 +15523,74 @@ export async function startServer({
           if (
             event === 'error' &&
             def.resumesSessionViaAcpLoad === true &&
-            agentResumeCtx.isResuming &&
-            agentResumeCtx.resumeSessionId &&
             !run.resumeAutoReseeded &&
-            isAgentResumeFailure(def.id, agentStderrTail, agentStdoutTail)
+            resolveAgentResumeFailurePolicy({
+              agentId: def.id,
+              stderr: agentStderrTail,
+              stdout: agentStdoutTail,
+              isResuming: agentResumePromptPolicy.skipTranscript,
+              resumeSessionId: agentResumePromptPolicy.resumeSessionId,
+            }).resumeFailed
           ) {
             design.runs.emit(run, 'diagnostic', {
               type: 'agent_resume_failed_suppressed',
               agent_id: def.id,
               reason: 'resume_failed',
-              previous_session_id: agentResumeCtx.resumeSessionId ?? null,
+              previous_session_id: agentResumePromptPolicy.resumeSessionId ?? null,
             });
             return;
           }
           if (event === 'agent' && data?.type === 'text_delta' && typeof data.delta === 'string') {
+            // Decode time, read before the emit — see `sendAgentEvent`.
+            const decodedAt = Date.now();
             if (emitTitleFilteredGuardedTextDelta(data.delta)) {
-              noteFirstTokenAt();
+              noteFirstTokenAt(decodedAt);
             }
             return;
           }
           if (event === 'agent') {
             noteFirstTokenFromAgentEvent(data);
             emitAgentEvent(data);
-          } else {
-            send(event, data);
+            return;
           }
+          if (event === 'error') {
+            // This payload is the whole user-visible surface of an ACP failure:
+            // `send` streams it to SSE clients and `design.runs.emit` reads
+            // `run.error` out of it, and the close handler below returns on
+            // `hasFatalError()` before any later rewrite can run. Explain a
+            // handshake rejection here or nowhere.
+            //
+            // …and name its model-service class here or nowhere, for the same
+            // reason. `fail()` emits either a bare `{ message }` or an
+            // `AGENT_EXECUTION_FAILED` envelope, so without this the nine
+            // acp-json-rpc runtimes reported a provider outage, a throttle and a
+            // signed-out CLI under one opaque code, while the json-event-stream
+            // and Claude paths below/above already ran the same classifier.
+            // Order matters: the handshake verdict is stamped first and
+            // `withAcpServiceFailureCode` never overwrites a code that is
+            // already specific.
+            send(event, withAcpServiceFailureCode(withAcpHandshakeFailureGuidance(
+              data,
+              agentFailureIdentity(def),
+            )));
+            return;
+          }
+          send(event, data);
         },
         ...(acpStageTimeoutMs !== undefined ? { stageTimeoutMs: acpStageTimeoutMs } : {}),
+      });
+      // Publish AMR/vela child-evidence coverage at child close. Without it the
+      // ACP runtime emits no `child_evidence_coverage_v1` at all and every AMR
+      // task aggregates as `child_lifecycle_unavailable_not_zero`, which cannot
+      // tell "this run had no Child agents" from "nobody was observing".
+      //
+      // Registration order is load-bearing: `attachAcpSession` installs its own
+      // close handler above, so the session has already settled
+      // finished/fatal/aborted by the time this one reads it and the coverage
+      // reflects how the turn actually ended. A non-AMR ACP agent has no vela
+      // consumer and yields undefined, which the publisher already ignores.
+      child.on('close', () => {
+        publishRuntimeChildEvidenceCoverage(acpSession?.childEvidenceCoverage?.());
       });
     } else if (def.streamFormat === 'dsh-profile-jsonl') {
       trackingSubstantiveOutput = true;
@@ -13389,6 +15645,45 @@ export async function startServer({
           send(event, data);
         },
       });
+    } else if (def.streamFormat === CODEX_APP_SERVER_STREAM_FORMAT) {
+      // codex over the JSON-RPC `app-server` transport. Everything flows
+      // through `sendAgentEvent`, exactly as it does for `exec --json`: the
+      // normalizer translates app-server notifications back into the codex
+      // stream frames the shipping parser already understands, so tool rows,
+      // file changes, warnings, errors and usage take the same code path they
+      // always did. The transport's own additions are token-level text and
+      // reasoning deltas.
+      trackingSubstantiveOutput = true;
+      acpSession = attachCodexAppServerSession({
+        child,
+        prompt: composed,
+        cwd: effectiveCwd,
+        model: safeModel,
+        reasoning: safeReasoning,
+        serviceTier: safeServiceTier,
+        sandboxMode: codexResolvedSandboxMode(),
+        imagePaths: def.supportsImagePaths ? amrStagedImages : [],
+        clientVersion: design.getAppVersion?.() ?? '0.0.0',
+        // Capture-style resume, same contract as `exec resume <thread_id>`:
+        // the id comes off the stream, and the daemon replays it here.
+        resumeSessionId:
+          agentResumeCtx.isResuming && agentResumeCtx.resumeSessionId
+            ? agentResumeCtx.resumeSessionId
+            : null,
+        onAgentEvent: (event) => sendAgentEvent(event),
+        onCliReady: () => noteCliReadyAt(),
+        onSessionReady: () => noteSessionInitDoneAt(),
+        // The prompt boundary for this transport is the `turn/start` write, not
+        // a stdin write that never happens. Marking it keeps the Langfuse
+        // `stdin-write` and `agent-call` spans — and therefore the tool spans
+        // nested under `agent-call` — present on app-server runs.
+        onPromptSendStart: () => {
+          lifecycle.mark('model_call_start');
+          lifecycle.mark('stdin_write_start');
+        },
+        onPromptSendEnd: () => lifecycle.mark('stdin_write_end'),
+        onTurnComplete: () => clearFirstOutputWatchdog(),
+      });
     } else if (def.streamFormat === 'json-event-stream') {
       // Pipe through sendAgentEvent so the OpenCode `type:'error'` frame
       // (now emitted as a real error event by json-event-stream.ts after
@@ -13399,9 +15694,30 @@ export async function startServer({
       const handler = createJsonEventStreamHandler(
         def.eventParser || def.id,
         sendAgentEvent,
+        def.id === 'opencode'
+          ? {
+              openCodeChildEvidence: {
+                cliVersion:
+                  run.preflightAgentCliVersion
+                  ?? getDetectedRuntimeVersions(def.id)?.agentCliVersion
+                  ?? '',
+                onCandidate: (candidate) => sendAgentEvent({
+                  type: 'diagnostic',
+                  name: 'opencode_child_task_candidate',
+                  ...candidate,
+                }),
+              },
+            }
+          : {},
       );
+      jsonEventStreamHandler = handler;
       child.stdout.on('data', (chunk) => handler.feed(chunk));
-      child.on('close', () => handler.flush());
+      child.on('close', (code, signal) => {
+        handler.flush();
+        publishRuntimeChildEvidenceCoverage(handler.childEvidenceCoverage(
+          code === 0 && signal === null && !run.cancelRequested && !agentStreamError,
+        ));
+      });
     } else if (def.id === 'antigravity') {
       // Buffer stdout until close so the auth-prompt guard can suppress
       // the OAuth URL before forwarding it to the client as assistant
@@ -13490,7 +15806,9 @@ export async function startServer({
       revokeToolToken('child_exit');
       if (!attemptStillOwnsRun()) return;
       unregisterChatAgentEventSink();
+      if (run.pendingTerminalFinish) return;
       if (finishCanceledIfRequested(1, null)) return;
+      if (acpSession) beginAcpAttemptTermination('acp_child_error');
       send('error', createSseErrorPayload('AGENT_EXECUTION_FAILED', err.message));
       finishWithRetryDecision('failed', 1, null);
     });
@@ -13511,6 +15829,109 @@ export async function startServer({
       }
       revokeToolToken('child_exit');
       unregisterChatAgentEventSink();
+      if (run.pendingTerminalFinish) return;
+      if (acpSession) beginAcpAttemptTermination('acp_child_close');
+      if (
+        def.id === 'codex' &&
+        strategyTaskAtStart &&
+        capturedSessionId &&
+        typeof spawnedAgentEnv?.CODEX_HOME === 'string'
+      ) {
+        const mapping = strategyTaskAtStart.runs.find((candidate) => (
+          candidate.runId === run.id
+        ));
+        if (mapping) {
+          try {
+            const childEvidence = await collectCodexChildEvidence({
+              codexHome: spawnedAgentEnv.CODEX_HOME,
+              parentSessionId: capturedSessionId,
+              taskExecutionId: strategyTaskAtStart.taskExecutionId,
+              runId: run.id,
+              taskRunIndex: mapping.taskRunIndex,
+              stage: mapping.inputStage,
+              parentObservationId: strategyTaskRunObservationId(
+                strategyTaskAtStart.taskExecutionId,
+                run.id,
+              ),
+              ...(run.preflightAgentCliVersion
+                ? { agentCliVersion: run.preflightAgentCliVersion }
+                : {}),
+              runStartedAtMs: run.createdAt,
+              runEndedAtMs: Date.now(),
+            });
+            for (const observation of childEvidence.observations) {
+              sendAgentEvent({
+                type: 'diagnostic',
+                name: 'normalized_agent_observation_v1',
+                observation,
+              });
+            }
+            // The adapter owns this figure: Codex identifies a Child
+            // observation per (session, turn), so deriving the count from
+            // observation ids here reported one re-invoked Child once per
+            // invocation, which no other runtime does.
+            const { knownChildCount } = childEvidence;
+            sendAgentEvent({
+              type: 'diagnostic',
+              name: 'child_evidence_coverage_v1',
+              coverage: {
+                availability: childEvidence.availability,
+                source: childEvidence.source,
+                knownChildCount,
+                explicitZero: childEvidence.availability === 'complete' && knownChildCount === 0,
+                limitations: childEvidence.limitations,
+                diagnosticCounts: childEvidence.diagnostics,
+              },
+            });
+          } catch (error) {
+            console.warn('[observability] Codex child evidence unavailable', String(error));
+            sendAgentEvent({
+              type: 'diagnostic',
+              name: 'child_evidence_coverage_v1',
+              coverage: {
+                availability: 'unavailable',
+                source: 'codex_rollout',
+                knownChildCount: 0,
+                explicitZero: false,
+                limitations: ['codex_child_evidence_collection_failed'],
+                diagnosticCounts: [{ code: 'collector_exception', count: 1 }],
+              },
+            });
+          }
+        }
+      }
+      // Native OpenCode filters child-session events out of the root JSON
+      // stream, so the live stream can only produce a terminal-only L1
+      // candidate — which fails the evidence graph on `child_started_missing`
+      // and refuses every COMPLEX task on this runtime. `opencode export
+      // --sanitize` is the only surface that pairs a child's `parentID` with
+      // its own transcript, and it can only be read once the child has exited.
+      // Any failure here publishes nothing, leaving the L1 candidate in place.
+      if (def.id === 'opencode' && strategyTaskAtStart) {
+        const launchPath = agentLaunch.launchPath;
+        const candidates = jsonEventStreamHandler?.childEvidenceCandidates() ?? [];
+        if (launchPath && spawnedAgentEnv && candidates.length > 0) {
+          try {
+            const facts = await collectOpenCodeChildEvidenceFacts({
+              candidates,
+              loadSanitizedExport: createOpenCodeSanitizedExportLoader({
+                launchPath,
+                env: spawnedAgentEnv,
+              }),
+            });
+            for (const fact of facts) {
+              sendAgentEvent({
+                type: 'diagnostic',
+                name: 'opencode_child_runtime_fact',
+                ...fact,
+              });
+            }
+          } catch (error) {
+            console.warn('[observability] OpenCode child export unavailable', String(error));
+          }
+        }
+      }
+
       // Resume-target-missing recovery runs BEFORE the generic fatal/stream-error
       // short-circuits. The signal arrives differently per adapter: codex reports
       // "no rollout found for thread id" as a stream `error` event, while AMR/vela
@@ -13523,10 +15944,25 @@ export async function startServer({
       if (
         !run.cancelRequested &&
         (runtimeResumesSessionById(def) || def.resumesSessionViaAcpLoad === true) &&
-        agentResumeCtx.isResuming &&
         run.conversationId &&
-        isAgentResumeFailure(def.id, agentStderrTail, agentStdoutTail)
+        resolveAgentResumeFailurePolicy({
+          agentId: def.id,
+          stderr: agentStderrTail,
+          stdout: agentStdoutTail,
+          isResuming: agentResumePromptPolicy.skipTranscript,
+          resumeSessionId: agentResumePromptPolicy.resumeSessionId,
+        }).autoReseedFullTranscript
       ) {
+        if (strategyTaskAtStart && strategyTaskAtStart.inputStage !== 'request') {
+          const blocked = blockAutomaticContinuation(db, { runId: run.id });
+          if (blocked) run.strategyTask = projectStrategyTask(blocked, run.id);
+          send('error', createSseErrorPayload(
+            'AGENT_SESSION_RESUME_FAILED',
+            'The locked OD Next native session is unavailable; the task was blocked without cold re-seeding.',
+            { retryable: false },
+          ));
+          return finishWithRetryDecision('failed', code ?? 1, signal ?? null);
+        }
         // The resumed upstream session is gone (expired / pruned). Clear the dead
         // handle and TRANSPARENTLY re-run this same turn with a fresh session +
         // the full transcript rebuilt from the DB — exactly the pre-session-reuse
@@ -13538,11 +15974,11 @@ export async function startServer({
         clearAgentSession(db, run.conversationId, def.id);
         if (!run.resumeAutoReseeded) {
           run.resumeAutoReseeded = true;
-          run.resumeAutoReseededFrom = agentResumeCtx.resumeSessionId ?? null;
+          run.resumeAutoReseededFrom = agentResumePromptPolicy.resumeSessionId ?? null;
           run.nativeSessionRecovery = markNativeSessionAutoReseeded({
             previous: run.nativeSessionRecovery,
             agentId: def.id,
-            previousSessionId: agentResumeCtx.resumeSessionId,
+            previousSessionId: agentResumePromptPolicy.resumeSessionId,
           });
           publishNativeSessionRecoveryMetadata();
           // Persisted to the per-run events.jsonl that the help → diagnostics
@@ -13552,7 +15988,7 @@ export async function startServer({
             type: 'agent_resume_auto_reseed',
             agent_id: def.id,
             reason: 'resume_failed',
-            previous_session_id: agentResumeCtx.resumeSessionId ?? null,
+            previous_session_id: agentResumePromptPolicy.resumeSessionId ?? null,
             stale_session_cleared: true,
             nativeSessionRecovery: run.nativeSessionRecovery,
           });
@@ -13566,7 +16002,7 @@ export async function startServer({
           'The previous session could not be resumed (it may have expired). Resend your message to continue with a fresh session.',
           { retryable: true },
         ));
-        return finishRun('failed', code ?? 1, signal ?? null);
+        return finishStrategyAwarePhysicalRun('failed', code ?? 1, signal ?? null);
       }
       if (acpFatalErrorObservedBeforeCancellation && acpSession?.hasFatalError()) {
         markRpcCloseReason('fatal_rpc_error');
@@ -13617,7 +16053,7 @@ export async function startServer({
         markRpcCloseReason('empty_output');
         send('error', createSseErrorPayload(
           'AGENT_EXECUTION_FAILED',
-          'Agent completed without producing any output. The model or provider may have returned an empty response. Check the agent logs for upstream errors, then try re-authenticating the agent, checking quota, or switching models.',
+          'Agent completed without producing any output. The model or provider may have returned an empty response. Check the agent logs for upstream errors, then try re-authenticating the agent or switching models.',
           { retryable: true },
         ));
         return finishWithRetryDecision('failed', code, signal);
@@ -13627,7 +16063,7 @@ export async function startServer({
         !run.cancelRequested &&
         isPluginAuthoringRun(db, run, getSnapshot) &&
         !(await hasGeneratedPluginArtifacts(cwd)) &&
-        !emittedRenderableQuestionForm(clarifyingQuestionText)
+        !emittedRenderableQuestionForm(run.askUserScanText)
       ) {
         send('error', createSseErrorPayload(
           'AGENT_EXECUTION_FAILED',
@@ -13755,6 +16191,11 @@ export async function startServer({
           runArtifactSideEffects.artifactWriteSeen ||
           runArtifactSideEffects.liveArtifactSeen,
       });
+      // Authentication guards above have now ruled out Antigravity's OAuth
+      // prompt. Publish any remaining guarded plaintext before a close error
+      // so both the emit-time admission ledger and durable-log reconciliation
+      // observe the genuine assistant response before the terminal boundary.
+      flushBufferedPlaintextStdout();
       // Skip the close-handler failure emit when the run is already
       // terminal: the inactivity watchdog (failForInactivity) finishes the
       // run — sending its error and clearing run.clients/eventsLogStream —
@@ -13819,10 +16260,13 @@ export async function startServer({
               `${agentStderrTail}\n${agentStdoutTail}`,
             );
             if (rewritten !== 'Agent stream error') {
-              send('error', createSseErrorPayload(
-                'AGENT_EXECUTION_FAILED',
-                rewritten,
-                { retryable: true },
+              send('error', withAcpHandshakeFailureGuidance(
+                createSseErrorPayload(
+                  'AGENT_EXECUTION_FAILED',
+                  rewritten,
+                  { retryable: true },
+                ),
+                agentFailureIdentity(def),
               ));
             }
           }
@@ -13861,25 +16305,6 @@ export async function startServer({
           } catch { /* project-level best-effort */ }
         })();
       }
-      // Flush buffered plain-text stdout (antigravity) that was not
-      // suppressed by the auth-prompt guard above. Send each chunk in
-      // order before finishing so the assistant text arrives before the
-      // run's `finished` event. Stamp first-token timing here — and only
-      // here — using the first chunk's arrival time, so the OAuth-prompt
-      // path (which returns before this flush) never records a TTFT for
-      // output the user never saw (PR #3412).
-      if (plaintextStdoutBuffer.length > 0 && firstBufferedStdoutAt !== null) {
-        noteFirstTokenAt(firstBufferedStdoutAt);
-      }
-      for (const chunk of plaintextStdoutBuffer) {
-        const strippedText = visibleStdoutControlStripper.write(chunk.text);
-        const visibleText = titleMarkerStripper.strip(strippedText);
-        if (visibleText) send('stdout', { chunk: visibleText });
-      }
-      const flushedControlText = visibleStdoutControlStripper.flush();
-      const flushedTitleMarkerText =
-        titleMarkerStripper.strip(flushedControlText) + titleMarkerStripper.flush();
-      if (flushedTitleMarkerText) send('stdout', { chunk: flushedTitleMarkerText });
       if (
         status === 'succeeded' &&
         (def.streamFormat ?? 'plain') === 'plain' &&
@@ -13986,6 +16411,7 @@ export async function startServer({
             model: safeModel ?? null,
             cwd: effectiveCwd,
             lastMessageId: run.assistantMessageId ?? null,
+            lastInputTokens: observedInputTokensForSession(),
           });
           run.nativeSessionRecovery = markNativeSessionCaptured({
             previous: run.nativeSessionRecovery,
@@ -14016,6 +16442,7 @@ export async function startServer({
           model: safeModel ?? null,
           cwd: effectiveCwd,
           lastMessageId: run.assistantMessageId ?? null,
+          lastInputTokens: observedInputTokensForSession(),
         });
         run.nativeSessionRecovery = markNativeSessionCaptured({
           previous: run.nativeSessionRecovery,
@@ -14026,6 +16453,208 @@ export async function startServer({
         publishNativeSessionRecoveryMetadata();
       }
       if (status === 'succeeded') {
+        if (strategyProtocol && !strategyProtocolResult) {
+          strategyProtocolResult = strategyProtocol.finish();
+          const tail = strategyProtocolResult.visibleText.slice(strategyVisibleEmitted.length);
+          if (tail) {
+            const tailEvent = def.streamFormat === 'plain' ? 'stdout' : 'agent';
+            const tailData = tailEvent === 'stdout'
+              ? { chunk: tail }
+              : { type: 'text_delta', delta: tail };
+            // The protocol withholds any text that might still turn out to be
+            // a reserved `<open-design-…>` block; `finish()` is what finally
+            // rules that out, so this tail is the first moment those bytes are
+            // user-visible. It cannot go back through `send` — `push` throws
+            // once the protocol is finished — so it applies the same visible
+            // output rule here. For a reply whose visible text was withheld in
+            // its entirety this is the ONLY thing the run ever puts on screen;
+            // without the mark the run reports no visible output at all and
+            // the analytics fallback collapses a real close-time wait back to
+            // `firstTokenAt`.
+            recordRunTelemetry('strategy close-time tail', () => {
+              applyVisibleOutputMarks(
+                runLifecycleMarkersForStreamEvent(tailEvent, tailData),
+              );
+            });
+            persistRunEventToAssistantMessage(db, run, tailEvent, tailData);
+            design.runs.emit(run, tailEvent, tailData);
+            strategyVisibleEmitted += tail;
+            // The frozen Harness prompt currently does not receive the nonce,
+            // so its authoritative completion signal remains the verified
+            // strategy verdict. Still fold a marker if a future frozen bundle
+            // explicitly carries the protocol; this close-time tail bypasses
+            // send() and would otherwise be the only uncovered visible path.
+            const doneCapture = advanceAuthenticatedDoneCapture({
+              fullVisibleText: strategyProtocolResult.visibleText,
+              delta: tail,
+              key: typeof run.doneKey === 'string' ? run.doneKey : '',
+              state: {
+                markerTail: run.completionMarkerTail,
+                awaitingConclusion: run.completionMarkerAwaitingConclusion,
+                authenticatedConclusion: run.authenticatedDoneConclusion,
+              },
+            });
+            run.completionMarkerTail = doneCapture.markerTail;
+            run.completionMarkerAwaitingConclusion = doneCapture.awaitingConclusion;
+            run.authenticatedDoneConclusion = doneCapture.authenticatedConclusion;
+          }
+        }
+        let deliverableValid = false;
+        // A turn that emitted no Runtime State can still have delivered. The
+        // coordinator may only infer that Direct Edit completion from verified
+        // physical delivery, so resolve the evidence here too — otherwise the
+        // inference has nothing to accept and correct work is discarded.
+        const mayInferDirectEditCompletion = Boolean(
+          strategyTaskAtStart
+          && (
+            odNextTurnMayInferDirectEditCompletion(
+              strategyTaskAtStart,
+              strategyProtocolResult,
+            )
+            || odNextTurnMayInferProductionCompletion(
+              strategyTaskAtStart,
+              strategyProtocolResult,
+            )
+          ),
+        );
+        const strategyCompletionCandidate = Boolean(
+          strategyTaskAtStart
+          && (
+            strategyProtocolResult?.runtimeState?.outcome === 'completed'
+            || mayInferDirectEditCompletion
+          ),
+        );
+        let processTreeQuiescentForFinalization = true;
+        // Every successful physical Run can produce a final Web deliverable,
+        // even when OD Next Runtime State is absent. Resolve the settled
+        // filesystem before deciding whether the host syntax gate applies.
+        if (acpAttemptTermination) {
+          const termination = await acpAttemptTermination;
+          processTreeQuiescentForFinalization = termination?.quiescent === true;
+        }
+        await resolveRunArtifactOutcomeBeforeFinishAsync();
+        const deliverableFinalization = await finalizeSuccessfulRunDeliverable({
+          projectsRoot: PROJECTS_DIR,
+          projectId: run.projectId ?? null,
+          projectMetadata: projectRecord?.metadata,
+          artifactCount: Number.isFinite(run.artifactCount) ? run.artifactCount : 0,
+          ...(Array.isArray(run.artifactPaths) ? { touchedPaths: run.artifactPaths } : {}),
+          relatedPaths:
+            run.artifactOutcome?.diff?.renderDependencyTouchedPaths ?? [],
+          processTreeQuiescent: processTreeQuiescentForFinalization,
+          syntaxFinalizerEnabled: deliverableSyntaxFinalizerEnabled(),
+          ...(run.deliverableSyntaxRepair
+            ? { repairState: run.deliverableSyntaxRepair }
+            : {}),
+          ...(run.deliverableSyntaxValidation?.metrics
+            ? { previousMetrics: run.deliverableSyntaxValidation.metrics }
+            : {}),
+        });
+        const { deliverable } = deliverableFinalization;
+        if (strategyCompletionCandidate) {
+          design.runs.setDeliverableValidation?.(run, deliverable);
+          deliverableValid = deliverable.valid;
+        }
+        // Host-owned syntax finalization is based on physical delivery, not on
+        // OD Next strategy identity. It never resumes or prompts the Agent.
+        if (deliverableFinalization.syntax.action !== 'skip') {
+          const syntaxFinalization = deliverableFinalization.syntax;
+          run.deliverableSyntaxValidation = syntaxFinalization.validation;
+          if (syntaxFinalization.validation.repairState) {
+            run.deliverableSyntaxRepair = syntaxFinalization.validation.repairState;
+          }
+          design.runs.persistState(run);
+          {
+            design.runs.emit(run, 'diagnostic', {
+              type: 'deliverable_syntax_validation',
+              source: 'run_finalizer',
+              status: syntaxFinalization.validation.status,
+              checker: 'checker' in syntaxFinalization.validation ? syntaxFinalization.validation.checker : null,
+              candidateHash:
+                'candidateHash' in syntaxFinalization.validation ? syntaxFinalization.validation.candidateHash : null,
+              checkedFileCount:
+                'checkedFiles' in syntaxFinalization.validation ? syntaxFinalization.validation.checkedFiles.length : 0,
+              checkCount:
+                syntaxFinalization.validation.metrics?.checkCount ?? null,
+              checkerDurationMs:
+                syntaxFinalization.validation.metrics?.checkerDurationMs ?? null,
+              repairableCheckCount:
+                syntaxFinalization.validation.metrics?.repairableCheckCount ?? null,
+              repairExecutor:
+                syntaxFinalization.validation.metrics?.repairExecutor ?? null,
+              repairDurationMs:
+                syntaxFinalization.validation.metrics?.repairDurationMs ?? null,
+              appliedRepairRules:
+                syntaxFinalization.validation.metrics?.appliedRepairRules ?? [],
+              finalization: syntaxFinalization.validation.finalization,
+              safeFixProposalCount: syntaxFinalization.validation.metrics?.safeFixProposalCount ?? null,
+              safeFixProposalDurationMs: syntaxFinalization.validation.metrics?.safeFixProposalDurationMs ?? null,
+            });
+          }
+          // A syntax warning is durable quality evidence, not an execution
+          // failure. Continue the normal artifact/ref/version delivery path.
+        }
+        if (strategyCompletionCandidate) {
+          // Observation only (this branch has no repair loop): did a phone-app
+          // prototype actually ship inside the staged handset shell? Feeds
+          // run_finished analytics so the rollout can measure shell adoption.
+          if (
+            deliverable.valid
+            && projectRecord?.metadata?.kind === 'prototype'
+            && typeof run.projectId === 'string'
+          ) {
+            try {
+              const observation = await observeOdNextDeviceShell({
+                projectRoot: resolveProjectDir(PROJECTS_DIR, run.projectId, projectRecord.metadata),
+                entryFile: deliverable.entryFile,
+                resolution: resolveOdNextDevicePlatform({
+                  metadata: projectRecord.metadata,
+                  textPlatform: typeof run.conversationId === 'string' && run.conversationId
+                    ? readConversationIntentSignals(db, run.conversationId).devicePlatform
+                    : null,
+                }),
+              });
+              if (observation) {
+                run.odNextDeviceShell = observation;
+                console.info('[od-next-device-shell]', {
+                  runId: run.id,
+                  platform: observation.platform,
+                  resolvedFrom: observation.resolvedFrom,
+                  entryFile: observation.entryFile,
+                  shellPresent: observation.shellPresent,
+                });
+              }
+              const primitives = await observeOdNextLayoutPrimitives({
+                projectRoot: resolveProjectDir(PROJECTS_DIR, run.projectId, projectRecord.metadata),
+                entryFile: deliverable.entryFile,
+                primitivesCss: typeof run.appliedPluginSnapshotId === 'string'
+                  ? selectOdNextLayoutPrimitivesCss(await loadOdNextTaskResourcesForSnapshot({
+                      bundledPluginsDir: BUNDLED_PLUGINS_DIR,
+                      snapshot: getSnapshot(db, run.appliedPluginSnapshotId),
+                    }))
+                  : null,
+              });
+              if (primitives) {
+                run.odNextLayoutPrimitives = primitives.presence;
+                console.info('[od-next-layout-primitives]', {
+                  runId: run.id,
+                  entryFile: primitives.entryFile,
+                  presence: primitives.presence,
+                });
+              }
+            } catch (err) {
+              console.warn(
+                `[od-next-device-shell] observation skipped: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        }
+        // Capture after best-effort syntax repair: verified committed bytes on
+        // success, or the retained original on refusal. Snapshotting denotes
+        // delivery, not syntax correctness; the Run keeps the warning evidence.
+        // Freeze the delivered bytes before linking the HTML version below;
+        // cover rendering remains asynchronous and does not delay the Run.
+        await captureChatArtifactsBeforeSuccess();
         try {
           await snapshotAiHtmlVersionsBeforeSuccess();
         } catch (err) {
@@ -14041,7 +16670,7 @@ export async function startServer({
               ...(details ? { details } : {}),
             },
           ));
-          finishRun('failed', 1, signal);
+          finishStrategyAwarePhysicalRun('failed', 1, signal);
           return;
         }
         try {
@@ -14049,8 +16678,189 @@ export async function startServer({
         } catch (err) {
           console.warn('[sessions] delivered session persistence failed', err);
         }
+        if (strategyTaskAtStart && strategyProtocolResult) {
+          let automaticContinuationChatBody = null;
+          const plan = strategyProtocolResult.planContract
+            ?? strategyProtocolResult.repairPlanContract;
+          let executionPreflight;
+          let complexRuntimeEvidence;
+          try {
+            const lockedPlan = plan ?? strategyTaskAtStart.planContract;
+            const evidence = await resolveAutomaticContinuationEvidence({
+              plan: lockedPlan,
+              phase: strategyProtocolResult.runtimeState?.outcome === 'completed'
+                ? 'completion'
+                : 'eligibility',
+              task: strategyTaskAtStart,
+              run,
+              localSyntheticCanary: readOdNextRolloutPolicy().localSyntheticCanary
+                && process.env.NODE_ENV !== 'production',
+              executionPreflightResolver: odNextExecutionPreflightResolver,
+              complexProductionResolver: odNextComplexProductionResolver,
+              runtimeCapabilitySnapshot: chatBody.runtimeCapabilitySnapshot,
+            });
+            executionPreflight = evidence.executionPreflight;
+            complexRuntimeEvidence = evidence.complexRuntimeEvidence;
+          } catch (error) {
+            if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
+            send('error', createSseErrorPayload(
+              'OD_NEXT_EXECUTION_PREFLIGHT_FAILED',
+              error instanceof Error ? error.message : String(error),
+              { retryable: false },
+            ));
+            finishStrategyAwarePhysicalRun('failed', 1, signal);
+            return;
+          }
+          // Cancellation can win while the daemon-owned resolver is awaiting
+          // host facts. Never let the stale continuation allocate a new Run or
+          // mutate the already-terminal task after that boundary.
+          if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
+          let transition;
+          try {
+            transition = prepareAutomaticStrategyContinuation({
+              db,
+              service: internalRunCreation,
+              task: strategyTaskAtStart,
+              parsed: strategyProtocolResult,
+              toolUseCount: strategyToolUseCount,
+              ...(executionPreflight ? { executionPreflight } : {}),
+              ...(complexRuntimeEvidence ? { complexRuntimeEvidence } : {}),
+              ...(
+                strategyProtocolResult.runtimeState?.outcome === 'completed'
+                || mayInferDirectEditCompletion
+                  ? {
+                      completionEvidence: {
+                        physicalStatus: 'succeeded',
+                        deliverableValid,
+                      },
+                    }
+                  : {}),
+              createMeta: (stage, instruction, taskRunIndex) => {
+                const identity = createHash('sha256')
+                  .update(`${strategyTaskAtStart.taskExecutionId}:${stage}:${taskRunIndex}`)
+                  .digest('hex');
+                const meta = {
+                  ...chatBody,
+                  // One logical task, several physical Runs. The chain is only
+                  // reassemblable downstream if each Run reports the lineage of
+                  // the Run that caused it.
+                  analyticsHints: {
+                    ...(chatBody.analyticsHints ?? {}),
+                    ...inheritedRunLineageHints(run, chatBody, taskRunIndex),
+                  },
+                  projectId: strategyTaskAtStart.projectId,
+                  conversationId: strategyTaskAtStart.conversationId,
+                  agentId: strategyTaskAtStart.selectedAgentId,
+                  appliedPluginSnapshotId: strategyTaskAtStart.snapshotId,
+                  pluginId: strategyTaskAtStart.strategyId,
+                  assistantMessageId: `odnext_assistant_${identity.slice(0, 32)}`,
+                  clientRequestId: `odnext_run_${identity.slice(0, 40)}`,
+                  message: instruction,
+                  currentPrompt: instruction,
+                  titleGeneration: undefined,
+                  userMessageId: undefined,
+                  odNextTaskInputSnapshot:
+                    run.odNextTaskInputSnapshot ?? chatBody.odNextTaskInputSnapshot ?? null,
+                };
+                automaticContinuationChatBody = {
+                  ...meta,
+                  requestFingerprint: createHash('sha256')
+                    .update(JSON.stringify({
+                      taskExecutionId: strategyTaskAtStart.taskExecutionId,
+                      sourceRunId: run.id,
+                      stage,
+                      taskRunIndex,
+                      instruction,
+                      projectId: meta.projectId,
+                      conversationId: meta.conversationId,
+                      agentId: meta.agentId,
+                      snapshotId: meta.appliedPluginSnapshotId,
+                    }))
+                    .digest('hex'),
+                };
+                return automaticContinuationChatBody;
+              },
+            });
+          } catch (error) {
+            if (run.cancelRequested || design.runs.isTerminal(run.status)) return;
+            send('error', createSseErrorPayload(
+              'OD_NEXT_CONTINUATION_FAILED',
+              error instanceof Error ? error.message : String(error),
+              { retryable: false },
+            ));
+            finishStrategyAwarePhysicalRun('failed', 1, signal);
+            return;
+          }
+          run.strategyTask = projectStrategyTask(transition.result.task, run.id);
+          if (transition.start && transition.prepared?.kind === 'ready') {
+            const nextRun = transition.prepared.run;
+            nextRun.strategyTask = projectStrategyTask(transition.result.task, nextRun.id);
+            pendingStrategyContinuation = {
+              run: nextRun,
+              chatBody: automaticContinuationChatBody,
+            };
+          }
+        }
       }
-      finishWithRetryDecision(status, code, signal);
+      const retried = finishWithRetryDecision(status, code, signal);
+      if (!retried && pendingStrategyContinuation) {
+        const continuation = pendingStrategyContinuation;
+        // This turn is not over: the daemon is about to run the next stage of
+        // the SAME logical task, with no user prompt of its own. Record the
+        // hand-off on the source stream — it lands in the Run's event log,
+        // which is where a multi-Run turn is reconstructed when diagnosing one.
+        //
+        // Observability only. Do NOT drive rendering from it: the client keeps
+        // the turn whole through `strategyTaskRunIndex` (folded at render time),
+        // and a consumer that re-pointed the existing message at `nextRunId`
+        // instead would print the continuation's answer twice.
+        const continuationTask = getStrategyTaskExecutionByRunId(db, continuation.run.id);
+        design.runs.emit(run, 'diagnostic', {
+          type: 'strategy_task_continuation',
+          taskExecutionId: continuationTask?.taskExecutionId
+            ?? strategyTaskAtStart?.taskExecutionId
+            ?? null,
+          sourceRunId: run.id,
+          nextRunId: continuation.run.id,
+          inputStage: continuationTask?.inputStage ?? null,
+          taskRunIndex: continuationTask?.runs.length
+            ? continuationTask.runs.length - 1
+            : null,
+        });
+        reconcileAssistantMessageOnRunEnd(db, design.runs, continuation.run);
+        internalRunCreation.start(
+          continuation.run,
+          {
+            // The continuation is composed from the source Run's body, so it
+            // carries the same project, agent, plugin and Skill facts. Identity
+            // is inherited rather than re-derived: nobody made a request for
+            // this Run, and the task it continues is the user's.
+            body: continuation.chatBody,
+            requestAnalyticsContext:
+              run.analyticsContext ?? run.analyticsRecovery?.context ?? null,
+            creationKind: 'created',
+            resumed: false,
+          },
+          async () => {
+            try {
+              return await startChatRun(continuation.chatBody, continuation.run);
+            } catch (error) {
+              reconcileStrategyTaskRunTerminal(db, {
+                runId: continuation.run.id,
+                status: 'failed',
+              });
+              const latestTask = getStrategyTaskExecutionByRunId(db, continuation.run.id);
+              if (latestTask) {
+                continuation.run.strategyTask = projectStrategyTask(
+                  latestTask,
+                  continuation.run.id,
+                );
+              }
+              throw error;
+            }
+          },
+        );
+      }
       } finally {
         // Best-effort cleanup of the per-run agy log file on every close
         // path — successful, failed, cancelled, or non-zero exit — so
@@ -14188,7 +16998,7 @@ export async function startServer({
     }
 
     const modelPrefs = appConfig.agentModels?.[agentId] ?? {};
-    design.runs.start(run, () => startChatRun({
+    const orbitRunBody = {
       agentId,
       projectId,
       conversationId: run.conversationId,
@@ -14209,7 +17019,16 @@ export async function startServer({
         'Do not ask follow-up questions, do not emit <question-form>, and do not wait for user input. This run is unattended; pick reasonable defaults and complete the artifact.',
         'Keep connector credentials and OD_TOOL_TOKEN private; never print or persist secrets.',
       ].join('\n'),
-    }, run));
+    };
+    // Nothing asked for this Run: it is a background refresh with no caller to
+    // attribute it to, so the analytics lifecycle finds no identity and stays
+    // silent. It still goes through the one start path, so the day a
+    // background Run gets an identity, it reports without further plumbing.
+    internalRunCreation.start(
+      run,
+      { body: orbitRunBody, requestAnalyticsContext: null },
+      () => startChatRun(orbitRunBody, run),
+    );
 
     const completion = (async () => {
       const finalStatus = await design.runs.wait(run);
@@ -14261,10 +17080,11 @@ export async function startServer({
   registerRunRoutes(app, {
     db,
     design,
+    resources: { listAllSkillLikeEntries },
     http: httpDeps,
-    paths: { PROJECTS_DIR, RUNTIME_DATA_DIR },
+    paths: { BUNDLED_PLUGINS_DIR, PROJECTS_DIR, RUNTIME_DATA_DIR },
     agents: { detectAgents, getAgentDef },
-    chat: { startChatRun },
+    chat: { prepareOdNextInitialPromptBundle, startChatRun },
     lifecycle: { isDaemonShuttingDown: () => daemonShuttingDown },
     plugins: {
       connectorService,
@@ -14272,6 +17092,7 @@ export async function startServer({
       firePipelineForRun,
       loadPluginRegistryView,
       renderPluginBriefTemplate,
+      getLocalPluginBySource: (id, source) => getLocalPluginBySource(db, id, source),
       authorizePluginRequest: async (req, res, pluginId) => {
         const authority = resolveOptionalLocalWorkspaceRequestAuthority(req);
         if (!authority.ok) {
@@ -14306,6 +17127,7 @@ export async function startServer({
       pinAssistantMessageOnRunCreate,
       reconcileAssistantMessageOnRunEnd,
     },
+    internalRuns: internalRunCreation,
     // POST /api/runs and POST /api/chat are this file's "create a run" entry
     // points — see RegisterRunRoutesDeps.enforceWorkspaceProjectMutation.
     // Same provider `collab` was built with (collab.workspaceContext ===
@@ -14603,7 +17425,7 @@ export async function startServer({
       // surface phantom conversations (#1361).
       if (conversationCreatedEvent) emitProjectEvent(projectId, conversationCreatedEvent);
       const persistedDesignSystemId = getProject(db, projectId)?.designSystemId ?? null;
-      design.runs.start(run, () => startChatRun({
+      const routineRunBody = {
         agentId,
         projectId,
         conversationId: run.conversationId,
@@ -14620,7 +17442,14 @@ export async function startServer({
           `You are running an unattended scheduled routine named "${routine.name}".`,
           'Do not ask follow-up questions, do not emit <question-form>, and do not wait for user input. Pick reasonable defaults and finish the task.',
         ].join('\n'),
-      }, run));
+      };
+      // A scheduled Automation has no caller either — see the live-artifact
+      // note above. Same start path, same reason.
+      internalRunCreation.start(
+        run,
+        { body: routineRunBody, requestAnalyticsContext: null },
+        () => startChatRun(routineRunBody, run),
+      );
     };
 
     // Tear-down for the case where the durable routine_run row was never
@@ -14778,7 +17607,7 @@ export async function startServer({
     validation: validationDeps,
     finalize: finalizeDeps,
     handoff: handoffDeps,
-    chat: { startChatRun },
+    chat: { prepareOdNextInitialPromptBundle, startChatRun },
     messages: {
       pinAssistantMessageOnRunCreate,
       reconcileAssistantMessageOnRunEnd,
@@ -14809,7 +17638,7 @@ export async function startServer({
     http: httpDeps,
     authorizeProjectRequest,
     paths: pathDeps,
-    chat: { startChatRun },
+    chat: { prepareOdNextInitialPromptBundle, startChatRun },
     agents: agentDeps,
     critique: critiqueDeps,
     appConfig: { readAppConfig },
@@ -14829,23 +17658,36 @@ export async function startServer({
   //   - `apps/daemon/tests/version-route.test.ts` → expects `{ url, server }`
   return await new Promise((resolve, reject) => {
     let daemonShutdownStarted = false;
+    const clearTerminalTelemetryFallbackTimers = () => {
+      for (const timer of terminalTelemetryFallbackTimers) clearTimeout(timer);
+      terminalTelemetryFallbackTimers.clear();
+    };
     const cleanupDaemonBackgroundWork = () => {
+      clearTerminalTelemetryFallbackTimers();
+      amrTerminalReportDelivery.stop();
       telemetry.disposeFatalHandlers();
       composioConnectorProvider.stopCatalogRefreshLoop();
       orbitService.stop();
       routineService?.stop();
       clearInterval(teamResourcesPollTimer);
+      // Disarms synchronously; the returned promise drains an in-flight pass.
+      // Nothing here awaits it — the point is that no NEW pass can start once
+      // the daemon is coming down.
+      void chatArtifactMaintenance.stop();
       workspaceHubSubscriptions?.dispose();
       hubEventRefreshes.dispose();
       workspaceDirectoryRefreshes.dispose();
       workspaceBillingRuntime.dispose();
       proactiveContentPull.dispose();
+      collabPublishWatcher.dispose();
       collabCloud?.dispose();
     };
     const shutdownDaemonRuns = async () => {
       if (daemonShutdownStarted) return;
       daemonShutdownStarted = true;
       daemonShuttingDown = true;
+      amrTerminalReportDelivery.stop();
+      clearTerminalTelemetryFallbackTimers();
       await design.runs.shutdownActive({ graceMs: resolveChatRunShutdownGraceMs() });
       await terminalService.shutdownActive();
       await browserSessionService.shutdownActive();
@@ -14895,6 +17737,7 @@ export async function startServer({
           return;
         }
         resolvedPort = boundPort;
+        startAmrTerminalReportDeliveryAfterBind(amrTerminalReportDelivery, boundPort);
         // When binding to all interfaces report localhost for local callers;
         // when binding to a specific address (e.g. a Tailscale IP) report that
         // address so remote callers and the sidecar use the correct URL.

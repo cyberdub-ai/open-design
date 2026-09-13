@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { TrackingProjectKind } from '@open-design/contracts/analytics';
 import { useAnalytics } from '../analytics/provider';
 import { trackFileManagerClick } from '../analytics/events';
 import { useT } from '../i18n';
@@ -46,6 +47,7 @@ export interface DesignFilesNavState {
 
 interface Props {
   projectId: string;
+  projectKind: TrackingProjectKind;
   filesRefreshKey?: number;
   /** Read-only viewer of a team-shared project: disables project mutations. */
   viewerOnly?: boolean;
@@ -56,6 +58,14 @@ interface Props {
    * only an empty local result swaps the creation CTAs for a syncing notice.
    */
   downloadPending?: boolean;
+  /**
+   * Whether `files` reflects a file list the daemon actually returned. Zero
+   * files before the first authoritative read is indistinguishable from a
+   * genuinely empty project, and the empty-state CTAs create NEW content --
+   * offering them to someone whose project does have files is the same class
+   * of mistake the `downloadPending` branch below already guards (OPEND-2283).
+   */
+  filesAuthoritative?: boolean;
   // Basename of the project's working directory when the user has chosen a
   // real folder (e.g. "openclaw"). Shown as the breadcrumb root instead of
   // the generic "project" label. Undefined for default-storage projects.
@@ -443,9 +453,11 @@ function RotatingTip({ auxiliary = false }: { auxiliary?: boolean }) {
  */
 export function DesignFilesPanel({
   projectId,
+  projectKind,
   filesRefreshKey = 0,
   viewerOnly = false,
   downloadPending = false,
+  filesAuthoritative = true,
   rootDirName,
   reloading,
   running = false,
@@ -1357,6 +1369,8 @@ export function DesignFilesPanel({
                       page_name: 'file_manager',
                       area: 'file_manager',
                       element: 'create_design_system_from_project',
+                      project_id: projectId,
+                      project_kind: projectKind,
                     });
                     setProjectMenuOpen(false);
                     onCreateDesignSystemFromProject();
@@ -1376,6 +1390,8 @@ export function DesignFilesPanel({
                       page_name: 'file_manager',
                       area: 'file_manager',
                       element: 'duplicate_project',
+                      project_id: projectId,
+                      project_kind: projectKind,
                     });
                     setProjectMenuOpen(false);
                     onDuplicateProject();
@@ -1501,6 +1517,8 @@ export function DesignFilesPanel({
                       page_name: 'file_manager',
                       area: 'file_manager',
                       element: 'download_as_zip',
+                      project_id: projectId,
+                      project_kind: projectKind,
                     });
                     void handleBatchDownload();
                   }}
@@ -1527,7 +1545,17 @@ export function DesignFilesPanel({
               </div>
             </div>
           ) : null}
-          {files.length === 0 && liveArtifacts.length === 0 && (folders?.length ?? 0) === 0 ? (
+          {files.length === 0 && liveArtifacts.length === 0 && (folders?.length ?? 0) === 0 && !filesAuthoritative ? (
+            // The list has not arrived. Saying nothing reads as "stuck"; saying
+            // "no designs yet" would be a guess. Say we are working instead.
+            <div className="df-empty df-empty-syncing" data-testid="design-files-loading">
+              <div className="df-empty-pill">
+                <FileSyncBadge state="downloading" size={20} />
+                <span className="df-empty-title">{t('common.loading')}</span>
+              </div>
+            </div>
+          ) : null}
+          {files.length === 0 && liveArtifacts.length === 0 && (folders?.length ?? 0) === 0 && filesAuthoritative ? (
             downloadPending ? (
               // A shared project whose local mirror has not caught up yet
               // reads as EXACTLY the same zero-files result as a genuinely

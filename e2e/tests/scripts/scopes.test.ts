@@ -15,7 +15,11 @@ type Plan = {
   scopes: Record<string, boolean | string>;
   enabled: Record<string, boolean>;
   matrices: { ui_p0: unknown[]; visual: unknown[] };
-  trace: { escalations: unknown[]; uiP0Shadow: { mode: string; matrix: Array<{ name: string }> } };
+  trace: {
+    escalations: unknown[];
+    ruleHits: Record<string, number>;
+    uiP0Shadow: { mode: string; matrix: Array<{ name: string }> };
+  };
 };
 
 function plan(context: "pr" | "merge-queue" | "full", files: string[] = []): Plan {
@@ -66,6 +70,19 @@ describe("workflow scope planner", () => {
       scopes: { tools_pack_tests_required: true, windows_tools_pack_payload_tests_required: true },
       enabled: { windows_tools_pack_payload_tests: true, ui_p0: false, playwright_critical: false },
     });
+    expect(plan("pr", ["tools/pack/src/launcher/layout.ts"])).toMatchObject({
+      scopes: { tools_pack_tests_required: true, windows_tools_pack_payload_tests_required: true },
+      enabled: { windows_tools_pack_payload_tests: true },
+    });
+    expect(plan("pr", ["tools/pack/src/mac/payload.ts"])).toMatchObject({
+      scopes: { tools_pack_tests_required: true, windows_tools_pack_payload_tests_required: false },
+      enabled: { windows_tools_pack_payload_tests: false },
+    });
+    expect(plan("pr", ["tools/pack/src/future-root-helper.ts"])).toMatchObject({
+      scopes: { tools_pack_tests_required: true, windows_tools_pack_payload_tests_required: true },
+      enabled: { windows_tools_pack_payload_tests: true },
+      trace: { ruleHits: { "tools-pack-root-source-fallback": 1 } },
+    });
     expect(plan("pr", ["packages/launcher-proto/src/index.ts"])).toMatchObject({
       scopes: { windows_tools_pack_payload_tests_required: true },
       enabled: { windows_tools_pack_payload_tests: true },
@@ -80,21 +97,61 @@ describe("workflow scope planner", () => {
     });
   });
 
+  test("routes canonical DSH installer sources to E2E Vitest", () => {
+    expect(plan("pr", ["tools/release/resources/dsh-bootstrap/install-dsh.sh"])).toMatchObject({
+      scopes: { web_tests_required: true },
+      enabled: { e2e_vitest: true },
+    });
+    expect(plan("pr", ["tools/release/resources/dsh-bootstrap/install-dsh.ps1"])).toMatchObject({
+      scopes: { web_tests_required: true },
+      enabled: { e2e_vitest: true },
+    });
+  });
+
   test("runs planner contract tests for CI control-plane changes", () => {
     const controlPlaneFiles = [
       ".github/config/scopes.json",
-      ".github/config/hash.json",
+      ".github/config/convergence.json",
       ".github/config/runners.json",
       ".github/scripts/scopes.py",
-      ".github/scripts/hash.py",
+      ".github/scripts/convergence.py",
       ".github/scripts/runners.py",
+      ".github/scripts/handoff.py",
       ".github/scripts/lib/config.py",
       ".github/scripts/lib/github.py",
+      ".github/scripts/lib/r2.py",
+      ".github/workflows/convergence.atom.yml",
     ];
     for (const file of controlPlaneFiles) {
       expect(plan("pr", [file]), file).toMatchObject({
         scopes: { web_tests_required: true, workspace_validation_required: true },
         enabled: { e2e_vitest: true, workspace_unit_tests: true },
+        trace: { escalations: [] },
+      });
+    }
+  });
+
+  test("keeps Terminal exact sources on the independent release validation line", () => {
+    for (const file of [
+      "apps/closure/src/index.ts",
+      "packages/standalone/src/store.ts",
+      "shells/terminal/src/cli.ts",
+      ".github/scripts/pack.py",
+      ".github/scripts/release.py",
+      ".github/workflows/convergence-exact.atom.yml",
+      ".github/workflows/release-exact.yml",
+    ]) {
+      const prPlan = plan("pr", [file]);
+      expect(prPlan, file).toMatchObject({
+        scopes: { workspace_validation_required: false },
+        enabled: { workspace_unit_tests: true },
+        trace: { escalations: [] },
+      });
+      expect(prPlan.enabled, file).not.toHaveProperty("terminal_scene");
+
+      expect(plan("merge-queue", [file]), file).toMatchObject({
+        scopes: { workspace_validation_required: false },
+        enabled: { workspace_unit_tests: false },
         trace: { escalations: [] },
       });
     }
@@ -143,6 +200,11 @@ describe("workflow scope planner", () => {
     const workflow = readFileSync(path.join(repoRoot, ".github/workflows/ci.yml"), "utf8");
     expect(workflow).toContain("python3 .github/scripts/scopes.py github-output");
     expect(workflow).not.toContain("scripts/scopes.ts");
-    expect(workflow).not.toMatch(/windows_tools_pack_payload_tests:[\s\S]*?\.github\/scripts\/(?:scopes|hash|runners)\.py/);
+    const windowsPayload = workflow.slice(
+      workflow.indexOf("  windows_tools_pack_payload_tests:"),
+      workflow.indexOf("  web_workspace_tests:"),
+    );
+    expect(windowsPayload).not.toMatch(/\.github\/scripts\/(?:scopes|convergence|runners)\.py/);
+    expect(workflow).not.toContain("  terminal_scene:");
   });
 });
